@@ -136,7 +136,7 @@ GROUPS_HEADERS = [
 
 
 def ensure_sheets():
-    get_or_create_ws("MIJOZ_GURUHLAR", GROUPS_HEADERS)
+    # MIJOZ_BOT allaqachon mavjud — faqat TRACKER kerak
     get_or_create_ws("TRACKER", TRACKER_HEADERS)
 
 
@@ -191,13 +191,39 @@ def today_str():
     return datetime.now(TZ).strftime("%Y-%m-%d")
 
 
+def _norm_group(r: Dict) -> Dict:
+    """MIJOZ_BOT ustunlarini bot ichki nomlariga moslaydi.
+
+    MIJOZ_BOT:  Mijoz ID | Mijoz nomi | Mijoz TG ID | Mas'ul ismi |
+                Mas'ul TG ID | Kunlik kontent | Guruh ID | Holat | ...
+    """
+    return {
+        "Mijoz ID":          r.get("Mijoz ID", ""),
+        "Mijoz nomi":        r.get("Mijoz nomi", ""),
+        "Guruh ID":          r.get("Guruh ID", ""),
+        "Storymaker nomi":   r.get("Mas'ul ismi", "") or r.get("Mas'ul", ""),
+        "Storymaker TG ID":  r.get("Mas'ul TG ID", ""),
+        "Mijoz TG ID":       r.get("Mijoz TG ID", ""),
+        "Kunlik kontent":    r.get("Kunlik kontent", STORY_TARGET),
+        "Holat":             r.get("Holat", ""),
+    }
+
+
 def get_groups():
-    ws = get_or_create_ws("MIJOZ_GURUHLAR", GROUPS_HEADERS)
-    if not ws:
-        return []
-    rows = [clean_keys(r) for r in ws.get_all_records()]
-    return [r for r in rows
-            if str(r.get("Aktiv", "")).strip().lower() in ("ha", "✅", "yes", "1", "true")]
+    """MIJOZ_BOT sahifasidan aktiv mijozlarni o'qiydi."""
+    rows = read_sheet("MIJOZ_BOT")
+    out = []
+    for r in rows:
+        g = _norm_group(r)
+        # Guruh ID bo'lmasa, kuzatib bo'lmaydi — o'tkazib yuboramiz
+        if not str(g.get("Guruh ID", "")).strip():
+            continue
+        # 'Holat' bo'sh yoki "tugagan/pauza" bo'lmasa — aktiv hisoblaymiz
+        holat = str(g.get("Holat", "")).strip().lower()
+        if "tugagan" in holat or "pauza" in holat or "❌" in holat or "⏸" in holat:
+            continue
+        out.append(g)
+    return out
 
 
 def get_today_row(mid):
@@ -217,6 +243,15 @@ def get_story_count(mid):
         return int(r.get("Story soni", 0) or 0)
     except (ValueError, TypeError):
         return 0
+
+
+def get_target(g: Dict) -> int:
+    """Mijozning kunlik story maqsadi (Kunlik kontent ustuni)."""
+    try:
+        t = int(str(g.get("Kunlik kontent", "")).strip() or STORY_TARGET)
+        return t if t > 0 else STORY_TARGET
+    except (ValueError, TypeError):
+        return STORY_TARGET
 
 
 def init_today_tracker():
@@ -286,7 +321,7 @@ async def send_user(ctx, uid, text, markup=None):
 async def story_notify_group(ctx: ContextTypes.DEFAULT_TYPE):
     for g in get_groups():
         mid = str(g.get("Mijoz ID", "")).strip()
-        if get_story_count(mid) >= STORY_TARGET:
+        if get_story_count(mid) >= get_target(g):
             continue
         gid = g.get("Guruh ID", "")
         if not gid:
@@ -394,11 +429,14 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cnt, mid = int(parts[1]), parts[2]
         update_tracker(mid, "Story soni", str(cnt))
         update_tracker(mid, "Story holati", f"{cnt} ta olindi")
-        if cnt >= STORY_TARGET:
+        g = next((x for x in get_groups()
+                  if str(x.get("Mijoz ID", "")).strip() == str(mid)), None)
+        target = get_target(g) if g else STORY_TARGET
+        if cnt >= target:
             await q.edit_message_text(f"✅ {cnt} ta kontent olindi! Bugun story tayyor. 🎉")
         else:
             await q.edit_message_text(
-                f"✅ {cnt} ta olindi. Bugun yana {STORY_TARGET - cnt} marta eslatiladi.")
+                f"✅ {cnt} ta olindi. Bugun yana {target - cnt} marta eslatiladi.")
 
     elif act == "post":
         ans, mid = parts[1], parts[2]
@@ -544,15 +582,20 @@ async def cmd_stats(update: Update, ctx):
 
 
 async def cmd_setup(update: Update, ctx):
-    await update.message.reply_text("⏳ Sahifalar tayyorlanmoqda...")
+    await update.message.reply_text("⏳ Tayyorlanmoqda...")
     ensure_sheets()
     await update.message.reply_text(
         "✅ *Tayyor!*\n\n"
-        "📋 *MIJOZ_GURUHLAR* — mijoz guruhlarini kiriting:\n"
-        "`Mijoz ID | Mijoz nomi | Guruh ID | Storymaker nomi | Storymaker TG ID | Aktiv`\n\n"
-        "📊 *TRACKER* — avtomatik to'ladi.\n\n"
-        "⚠️ Har mijoz uchun qator qo'shing, *Aktiv* ga `Ha` yozing.\n"
-        "Guruh ID manfiy bo'ladi (masalan -1001234567890).",
+        "Bot mavjud *MIJOZ_BOT* sahifangizdan o'qiydi.\n"
+        "Har mijoz uchun quyidagilar to'ldirilgan bo'lsin:\n\n"
+        "• *Mijoz nomi* — mijoz ismi\n"
+        "• *Guruh ID* — mijoz guruhi (manfiy son: -100...)\n"
+        "• *Mas'ul ismi* — storymaker ismi\n"
+        "• *Mas'ul TG ID* — storymaker Telegram ID\n"
+        "• *Kunlik kontent* — kuniga nechta story (masalan 3)\n"
+        "• *Holat* — bo'sh yoki ✅ (tugagan/pauza bo'lmasin)\n\n"
+        "📊 *TRACKER* sahifasi avtomatik to'ladi.\n\n"
+        "⚠️ Botni har mijoz guruhiga *admin* qilib qo'shing!",
         parse_mode="Markdown")
 
 
