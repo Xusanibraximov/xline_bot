@@ -97,6 +97,16 @@ def clean_keys(row: Dict) -> Dict:
     return {str(k).strip(): v for k, v in row.items()}
 
 
+def esc(text) -> str:
+    """Telegram Markdown uchun xavfli belgilarni tozalaydi.
+    Sheetdagi ma'lumotda *, _, [, ` bo'lsa, parse xatosini oldini oladi.
+    """
+    s = str(text) if text is not None else ""
+    for ch in ("*", "_", "[", "]", "`"):
+        s = s.replace(ch, "")
+    return s
+
+
 def read_sheet(tab: str) -> List[Dict]:
     try:
         book = get_book()
@@ -349,7 +359,7 @@ async def story_ask_sm(ctx: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("✅ Ha", callback_data=f"info::yes::{mid}"),
         InlineKeyboardButton("❌ Yo'q", callback_data=f"info::no::{mid}"),
     ]])
-    await send_user(ctx, sm, f"❓ *{g.get('Mijoz nomi','')}* ma'lumot berdilarmi?", kb)
+    await send_user(ctx, sm, f"❓ *{esc(g.get('Mijoz nomi',''))}* ma'lumot berdilarmi?", kb)
 
 
 async def post_ask(ctx: ContextTypes.DEFAULT_TYPE):
@@ -362,7 +372,7 @@ async def post_ask(ctx: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("✅ Ha", callback_data=f"post::yes::{mid}"),
             InlineKeyboardButton("❌ Yo'q", callback_data=f"post::no::{mid}"),
         ]])
-        await send_user(ctx, sm, f"📤 *{g.get('Mijoz nomi','')}* uchun post yuklandimi?", kb)
+        await send_user(ctx, sm, f"📤 *{esc(g.get('Mijoz nomi',''))}* uchun post yuklandimi?", kb)
 
 
 # ═══════════════════════════════════════════════
@@ -393,7 +403,7 @@ async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
             continue
         text = f"⏰ *Bajarilmagan vazifalar ({len(tasks)} ta):*\n\n"
         for t in tasks[:10]:
-            text += f"  {t.get('Muhimligi','')} {t.get('Vazifa','')} — 📅 {t.get('Deadline','')}\n"
+            text += f"  {esc(t.get('Muhimligi',''))} {esc(t.get('Vazifa',''))} — 📅 {esc(t.get('Deadline',''))}\n"
         await send_user(ctx, tg, text)
 
 
@@ -421,7 +431,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                       if str(x.get("Mijoz ID", "")).strip() == str(mid)), None)
             if g and g.get("Guruh ID"):
                 await send_group(ctx, g.get("Guruh ID"),
-                    f"⚠️ *{g.get('Mijoz nomi','')}*, siz hali story uchun ma'lumot "
+                    f"⚠️ *{esc(g.get('Mijoz nomi',''))}*, siz hali story uchun ma'lumot "
                     f"tashlamadingiz. Iltimos, tashlab bering. 🙏")
             await q.edit_message_text("✅ Mijoz guruhiga eslatma yuborildi.")
 
@@ -504,8 +514,8 @@ async def cmd_today(update: Update, ctx):
     text = f"☀️ *BUGUNGI 3 VAZIFA — {datetime.now(TZ):%d-%m-%Y}*\n\n"
     kb = []
     for t in tasks:
-        text += f"{t.get('Muhimligi','')} *{t.get('Vazifa','')}*\n   👤 {t.get('Javobgar','')}  📅 {t.get('Deadline','')}\n\n"
-        kb.append([InlineKeyboardButton(f"✅ {t.get('Vazifa','')[:25]}",
+        text += f"{esc(t.get('Muhimligi',''))} *{esc(t.get('Vazifa',''))}*\n   👤 {esc(t.get('Javobgar',''))}  📅 {esc(t.get('Deadline',''))}\n\n"
+        kb.append([InlineKeyboardButton(f"✅ {esc(t.get('Vazifa',''))[:25]}",
                                         callback_data=f"done::{t.get('ID','')}")])
     await m.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -518,7 +528,7 @@ async def cmd_tasks(update: Update, ctx):
         return
     text = f"📋 *BAJARILMAGAN ({len(tasks)} ta):*\n\n"
     for t in tasks:
-        text += f"{t.get('Muhimligi','')} *{t.get('Vazifa','')}*\n   👤 {t.get('Javobgar','')}  📅 {t.get('Deadline','')}\n\n"
+        text += f"{esc(t.get('Muhimligi',''))} *{esc(t.get('Vazifa',''))}*\n   👤 {esc(t.get('Javobgar',''))}  📅 {esc(t.get('Deadline',''))}\n\n"
     await m.edit_text(text, parse_mode="Markdown")
 
 
@@ -530,7 +540,7 @@ async def cmd_videos(update: Update, ctx):
         return
     text = f"🎬 *VIDEOLAR ({len(vids)} ta):*\n\n"
     for v in vids:
-        text += f"🎥 *{v.get('ID','')}* — {v.get('Mavzu','') or '—'}\n   {v.get('Holat','')}  📅 {v.get('Deadline','')}\n\n"
+        text += f"🎥 *{esc(v.get('ID',''))}* — {esc(v.get('Mavzu','') or '—')}\n   {esc(v.get('Holat',''))}  📅 {esc(v.get('Deadline',''))}\n\n"
     await m.edit_text(text, parse_mode="Markdown")
 
 
@@ -542,7 +552,7 @@ async def cmd_content(update: Update, ctx):
         return
     text = f"📅 *KONTENT ({len(cs)} ta):*\n\n"
     for c in cs:
-        text += f"{c.get('Holat','')} *{c.get('Sana','')} {c.get('Vaqt','')}*\n   🎬 {c.get('Loyiha','')} | {c.get('Platforma','')}\n   📝 {c.get('Turi','')} — {c.get('Mavzu','')}\n\n"
+        text += f"{esc(c.get('Holat',''))} *{esc(c.get('Sana',''))} {esc(c.get('Vaqt',''))}*\n   🎬 {esc(c.get('Loyiha',''))} | {esc(c.get('Platforma',''))}\n   📝 {esc(c.get('Turi',''))} — {esc(c.get('Mavzu',''))}\n\n"
     await m.edit_text(text, parse_mode="Markdown")
 
 
@@ -554,7 +564,7 @@ async def cmd_meetings(update: Update, ctx):
         return
     text = f"🤝 *UCHRASHUVLAR ({len(us)} ta):*\n\n"
     for u in us:
-        text += f"📌 *{u.get('Sana','')} {u.get('Vaqt','')}*\n   👤 {u.get('Kim bilan','')}\n   🎯 {u.get('Maqsad','')}\n\n"
+        text += f"📌 *{esc(u.get('Sana',''))} {esc(u.get('Vaqt',''))}*\n   👤 {esc(u.get('Kim bilan',''))}\n   🎯 {esc(u.get('Maqsad',''))}\n\n"
     await m.edit_text(text, parse_mode="Markdown")
 
 
@@ -566,7 +576,9 @@ async def cmd_clients(update: Update, ctx):
         return
     text = f"👥 *MIJOZLAR ({len(cs)} ta):*\n\n"
     for c in cs:
-        text += f"👤 *{c.get('Mijoz','')}*\n   📱 {c.get('Platforma','')}\n   👨‍💼 {c.get('Mas''ul','')} / {c.get('Yordamchi','')}\n\n"
+        masul = c.get("Mas'ul", "")
+        yord = c.get("Yordamchi", "")
+        text += f"👤 *{esc(c.get('Mijoz',''))}*\n   📱 {esc(c.get('Platforma',''))}\n   👨‍💼 {esc(masul)} / {esc(yord)}\n\n"
     await m.edit_text(text, parse_mode="Markdown")
 
 
@@ -608,9 +620,9 @@ async def cmd_holat(update: Update, ctx):
         return
     text = f"📊 *BUGUNGI HOLAT — {today_str()}*\n\n"
     for r in rows:
-        text += (f"👤 *{r.get('Mijoz nomi','')}*\n"
-                 f"   📸 Story: {r.get('Story soni','0')}/3 ({r.get('Story holati','')})\n"
-                 f"   📤 Post: {r.get('Post holati','')}\n\n")
+        text += (f"👤 *{esc(r.get('Mijoz nomi',''))}*\n"
+                 f"   📸 Story: {esc(r.get('Story soni','0'))}/3 ({esc(r.get('Story holati',''))})\n"
+                 f"   📤 Post: {esc(r.get('Post holati',''))}\n\n")
     await m.edit_text(text, parse_mode="Markdown")
 
 
