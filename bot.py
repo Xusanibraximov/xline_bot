@@ -397,7 +397,12 @@ async def send_group(ctx, gid, text, markup=None):
         await ctx.bot.send_message(chat_id=int(gid), text=text,
                                    parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        logger.error(f"❌ Guruh ({gid}) xato: {e}")
+        # Markdown xato bersa — oddiy matn sifatida qayta yuboramiz
+        try:
+            await ctx.bot.send_message(chat_id=int(gid), text=text,
+                                       reply_markup=markup)
+        except Exception as e2:
+            logger.error(f"❌ Guruh ({gid}) xato: {e2}")
 
 
 async def send_user(ctx, uid, text, markup=None):
@@ -405,7 +410,29 @@ async def send_user(ctx, uid, text, markup=None):
         await ctx.bot.send_message(chat_id=int(uid), text=text,
                                    parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        logger.error(f"❌ User ({uid}) xato: {e}")
+        # Markdown xato bersa — oddiy matn sifatida qayta yuboramiz
+        try:
+            await ctx.bot.send_message(chat_id=int(uid), text=text,
+                                       reply_markup=markup)
+        except Exception as e2:
+            logger.error(f"❌ User ({uid}) xato: {e2}")
+
+async def safe_reply(msg_obj, text, markup=None, edit=False):
+    """reply_text/edit_text ni Markdown bilan, xato bo'lsa oddiy matn bilan yuboradi."""
+    try:
+        if edit:
+            await msg_obj.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        else:
+            await msg_obj.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    except Exception:
+        try:
+            if edit:
+                await msg_obj.edit_text(text, reply_markup=markup)
+            else:
+                await msg_obj.reply_text(text, reply_markup=markup)
+        except Exception as e:
+            logger.error(f"safe_reply xato: {e}")
+
 
 
 # ═══════════════════════════════════════════════
@@ -818,11 +845,11 @@ def register_bot_user(user) -> None:
 async def cmd_start(update: Update, ctx):
     user = update.effective_user
 
-    # Avval menyuni yuboramiz (register xato bersa ham javob bersin)
+    # Menyuni oddiy matn sifatida yuboramiz (Markdown xatosi bo'lmasligi uchun)
     if is_admin(user.id):
         await update.message.reply_text(
-            "🎬 *X-LINE BOT* (Admin)\n\n"
-            "*Buyruqlar:*\n"
+            "🎬 X-LINE BOT (Admin)\n\n"
+            "BUYRUQLAR:\n"
             "📋 /today — bugungi 3 vazifa\n"
             "🎯 /tasks — barcha vazifalar\n"
             "🎬 /videos — jarayondagi videolar\n"
@@ -835,19 +862,17 @@ async def cmd_start(update: Update, ctx):
             "👥 /davomat — hodimlar rollari\n"
             "🔄 /setup — sozlash\n"
             "▶️ /test_story — story sinash\n\n"
-            "*🤖 AI yordamchi:*\n"
+            "🤖 AI YORDAMCHI:\n"
             "💡 /goya — story g'oyalari\n"
             "✍️ /caption — post caption + hashtag\n"
             "🤖 /ai — istalgan savol/vazifa\n\n"
-            "_Bot mustaqil ishlaydi: story 9/14/19, post 17:00, vazifa har soat._",
-            parse_mode="Markdown")
+            "Bot mustaqil ishlaydi: story 9/14/19, post 17:00, vazifa har soat.")
     else:
         await update.message.reply_text(
-            "🎬 *X-LINE BOT*\n\n"
+            "🎬 X-LINE BOT\n\n"
             "Assalomu alaykum! Men sizga o'z vazifalaringiz va "
             "story/post bo'yicha eslatma yuborib turaman.\n\n"
-            "Eslatma kelganda tugmalar orqali javob berib boring. 🙏",
-            parse_mode="Markdown")
+            "Eslatma kelganda tugmalar orqali javob berib boring. 🙏")
 
     # Foydalanuvchini ro'yxatga yozish (xato bo'lsa ham menyuga ta'sir qilmaydi)
     try:
