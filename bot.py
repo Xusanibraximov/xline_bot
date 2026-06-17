@@ -90,7 +90,7 @@ def ask_ai(prompt: str, system: str = "") -> str:
         data = json.dumps({
             "model": GROQ_MODEL,
             "messages": messages,
-            "temperature": 0.8,
+            "temperature": 0.7,
             "max_tokens": 1024,
         }).encode("utf-8")
 
@@ -106,8 +106,13 @@ def ask_ai(prompt: str, system: str = "") -> str:
             result = json.loads(resp.read().decode("utf-8"))
             return result["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
-        logger.error(f"❌ Groq HTTP xato: {e.code}")
-        return f"⚠️ AI xatosi ({e.code}). Keyinroq urinib ko'ring."
+        # Xatoning aniq sababini logga yozamiz (model nomi, key muammosi va h.k.)
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            err_body = ""
+        logger.error(f"❌ Groq HTTP {e.code}: {err_body[:300]}")
+        return f"⚠️ AI xatosi ({e.code})."
     except Exception as e:
         logger.error(f"❌ Groq xato: {e}")
         return "⚠️ AI bilan bog'lanishda xato."
@@ -238,7 +243,14 @@ def _parse_date(s: str):
 
 def get_vazifalar(limit=20):
     data = read_sheet("VAZIFALAR")
-    p = [t for t in data if "Yo'q" in str(t.get("Bajarildi", ""))]
+    # Bajarilmagan = "✅ Ha" yoki "Bajarildi" bo'lmaganlar
+    p = []
+    for t in data:
+        b = str(t.get("Bajarildi", ""))
+        if "✅" in b or b.strip().lower() in ("ha", "bajarildi"):
+            continue
+        if str(t.get("Vazifa", "")).strip():
+            p.append(t)
     p.sort(key=lambda x: str(x.get("Deadline", "")))
     return p[:limit]
 
@@ -499,12 +511,37 @@ async def post_ask(ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════
 #  VAZIFA ESLATMA (har soatda)
 # ═══════════════════════════════════════════════
-def get_person_tg(name):
+def get_person_tg(name, role=None):
+    """Ism (va ixtiyoriy rol) bo'yicha TG ID topadi.
+    Avval aniq tenglikni, keyin qisman moslikni tekshiradi.
+    """
+    name = str(name).strip()
+    if not name:
+        return None
+
+    candidates = []  # (tg, rol_mos)
     for sheet in ("Hodimlar", "JAMOA"):
         for r in read_sheet(sheet):
             ism = str(r.get("Ism", "")).strip()
             tg = r.get("Tg id") or r.get("Telegram ID") or r.get("TG ID")
-            if ism and name and ism.lower() in name.lower() and tg:
+            if not tg or not ism:
+                continue
+            rol = str(r.get("Rol", "")).strip()
+            tg = str(tg).strip()
+            # Aniq tenglik
+            if ism.lower() == name.lower():
+                if role and _match_role(rol) == role:
+                    return tg  # ism + rol mos — eng aniq
+                candidates.append(tg)
+    # Aniq ism mos kelganlardan birinchisi
+    if candidates:
+        return candidates[0]
+    # Qisman moslik (zaxira)
+    for sheet in ("Hodimlar", "JAMOA"):
+        for r in read_sheet(sheet):
+            ism = str(r.get("Ism", "")).strip()
+            tg = r.get("Tg id") or r.get("Telegram ID") or r.get("TG ID")
+            if ism and tg and ism.lower() in name.lower():
                 return str(tg).strip()
     return None
 
@@ -560,18 +597,41 @@ async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
     hour = datetime.now(TZ).hour
     if hour < 9 or hour > 21:   # faqat 09:00–21:00
         return
+
+    today = date.today()
+    cutoff = today + timedelta(days=2)   # bugun + 2 kun ichidagi vazifalar
+
     by_person = {}
     for r in read_sheet("VAZIFALAR"):
-        if "Yo'q" in str(r.get("Bajarildi", "")):
-            p = str(r.get("Javobgar", "")).strip()
-            by_person.setdefault(p, []).append(r)
+        if "Yo'q" not in str(r.get("Bajarildi", "")) and \
+           "Bajarildi" not in str(r.get("Bajarildi", "")) and \
+           "✅" not in str(r.get("Bajarildi", "")):
+            # Bajarilmagan (Jarayonda yoki boshqa) — davom etamiz
+            pass
+        # Faqat bajarilmaganlarni olamiz (✅ Ha bo'lmaganlar)
+        bajarildi = str(r.get("Bajarildi", ""))
+        if "✅" in bajarildi or bajarildi.strip() == "Ha":
+            continue
+
+        # Deadline 2 kun ichidami?
+        d = _parse_date(str(r.get("Deadline", "")))
+        if d and d > cutoff:
+            continue  # 2 kundan uzoq — hozircha eslatmaymiz
+
+        p = str(r.get("Javobgar", "")).strip()
+        by_person.setdefault(p, []).append(r)
+
     for person, tasks in by_person.items():
         tg = get_person_tg(person)
         if not tg:
             continue
-        text = f"⏰ *Bajarilmagan vazifalar ({len(tasks)} ta):*\n\n"
-        for t in tasks[:10]:
-            text += f"  {esc(t.get('Muhimligi',''))} {esc(t.get('Vazifa',''))} — 📅 {esc(t.get('Deadline',''))}\n"
+        # Deadline bo'yicha saralash
+        tasks.sort(key=lambda x: _parse_date(str(x.get("Deadline", ""))) or date.max)
+        text = f"⏰ Yaqin 2 kunlik vazifalar ({len(tasks)} ta):\n\n"
+        for t in tasks[:15]:
+            d = _parse_date(str(t.get("Deadline", "")))
+            belgi = "🔴" if d and d <= today else "🟡"
+            text += f"  {belgi} {esc(t.get('Vazifa',''))} — 📅 {esc(t.get('Deadline',''))}\n"
         await send_user(ctx, tg, text)
 
 
@@ -579,48 +639,76 @@ async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
 #  VIDEO ZANJIRI (operator → montajchi → post)
 # ═══════════════════════════════════════════════
 async def video_chain_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-    """Video bosqichlari bo'yicha tegishli rolga eslatma yuboradi.
+    """Video bosqichlari bo'yicha operator va montajchiga eslatma yuboradi.
 
-    VIDEO ISHLAB CHIQARISH sheetdan Holat ustuniga qarab:
-      - Suratga olish boshlanmagan → Operator'ga
-      - Suratga olish tayyor, Montaj jarayonda/yo'q → Montajchi'ga
+    VIDEO ISHLAB CHIQARISH ustunlari (pozitsiya bo'yicha, chunki nomlar takrorlanadi):
+      0:ID 1:Mavzu 2:Loyiha 3:Ssenariy 4:Operator 5:Xolati 6:Deadline
+      7:Montajchi 8:Xolati 9:Deadline 10:Post mas'ul 11:Deadline 12:Holat
     """
-    videos = read_sheet("VIDEO ISHLAB CHIQARISH")
-    operators = get_staff_by_role("operator")
-    montajchilar = get_staff_by_role("montajchi")
+    book = get_book()
+    if not book:
+        return
+    try:
+        ws = book.worksheet("VIDEO ISHLAB CHIQARISH")
+        rows = ws.get_all_values()  # pozitsiya bo'yicha (xom ko'rinish)
+    except Exception as e:
+        logger.error(f"VIDEO o'qish xato: {e}")
+        return
 
-    op_tasks, mo_tasks = [], []
-    for v in videos:
-        holat = str(v.get("Holat", ""))
-        surat = str(v.get("Suratga olish", ""))
-        montaj = str(v.get("Montaj", ""))
-        vid = v.get("ID", "")
-        deadline = v.get("Deadline", "")
-        mavzu = v.get("Mavzu", "") or vid
+    if len(rows) < 2:
+        return
 
-        if "Tayyor" in holat:
-            continue  # tugagan
+    # Har bir operator/montajchi uchun vazifalarni yig'amiz
+    op_tasks = {}   # ism -> [matnlar]
+    mo_tasks = {}
 
-        # Syomka hali olinmagan → operator
-        if "Boshlanmagan" in surat or surat.strip() == "":
-            op_tasks.append(f"🎥 {esc(mavzu)} — 📅 {esc(deadline)}")
-        # Syomka bor, montaj yo'q → montajchi
-        elif "Tayyor" in surat and "Tayyor" not in montaj:
-            mo_tasks.append(f"✂️ {esc(mavzu)} — 📅 {esc(deadline)}")
+    for row in rows[1:]:  # header'ni o'tkazib yuboramiz
+        # Xavfsiz indekslash
+        def cell(i):
+            return row[i].strip() if i < len(row) else ""
 
-    if op_tasks:
-        for op in operators:
-            text = (f"🎥 *Syomka eslatmasi ({len(op_tasks)} ta):*\n\n"
-                    + "\n".join(op_tasks)
-                    + "\n\nIltimos, syomkalarni rejalashtiring.")
-            await send_user(ctx, op["tg"], text)
+        mavzu      = cell(1)
+        operator   = cell(4)
+        op_holat   = cell(5)
+        op_deadline = cell(6)
+        montajchi  = cell(7)
+        mo_holat   = cell(8)
+        mo_deadline = cell(9)
 
-    if mo_tasks:
-        for mo in montajchilar:
-            text = (f"✂️ *Montaj eslatmasi ({len(mo_tasks)} ta):*\n\n"
-                    + "\n".join(mo_tasks)
-                    + "\n\nIltimos, montajni davom ettiring.")
-            await send_user(ctx, mo["tg"], text)
+        if not mavzu:
+            continue
+
+        # Operator: holati "Tayyor" bo'lmasa eslatadi
+        if operator and "Tayyor" not in op_holat and op_holat:
+            op_tasks.setdefault(operator, []).append(
+                f"🎥 {esc(mavzu)} — {esc(op_holat)} — 📅 {esc(op_deadline)}")
+
+        # Montajchi: holati "Tayyor" bo'lmasa eslatadi
+        if montajchi and "Tayyor" not in mo_holat and mo_holat:
+            mo_tasks.setdefault(montajchi, []).append(
+                f"✂️ {esc(mavzu)} — {esc(mo_holat)} — 📅 {esc(mo_deadline)}")
+
+    # Operatorlarga yuborish
+    for ism, tasks in op_tasks.items():
+        tg = get_person_tg(ism, role="operator")
+        if not tg:
+            logger.warning(f"Operator '{ism}' TG ID topilmadi")
+            continue
+        text = (f"🎥 Syomka eslatmasi ({len(tasks)} ta):\n\n"
+                + "\n".join(tasks)
+                + "\n\nIltimos, syomkalarni rejalashtiring.")
+        await send_user(ctx, tg, text)
+
+    # Montajchilarga yuborish
+    for ism, tasks in mo_tasks.items():
+        tg = get_person_tg(ism, role="montajchi")
+        if not tg:
+            logger.warning(f"Montajchi '{ism}' TG ID topilmadi")
+            continue
+        text = (f"✂️ Montaj eslatmasi ({len(tasks)} ta):\n\n"
+                + "\n".join(tasks)
+                + "\n\nIltimos, montajni davom ettiring.")
+        await send_user(ctx, tg, text)
 
 
 # ═══════════════════════════════════════════════
@@ -861,7 +949,8 @@ async def cmd_start(update: Update, ctx):
             "🎛 /nazorat — to'liq nazorat paneli\n"
             "👥 /davomat — hodimlar rollari\n"
             "🔄 /setup — sozlash\n"
-            "▶️ /test_story — story sinash\n\n"
+            "▶️ /test_story — story sinash\n"
+            "🎬 /test_video — video eslatma sinash\n\n"
             "🤖 AI YORDAMCHI:\n"
             "💡 /goya — story g'oyalari\n"
             "✍️ /caption — post caption + hashtag\n"
@@ -872,6 +961,7 @@ async def cmd_start(update: Update, ctx):
             "🎬 X-LINE BOT\n\n"
             "Assalomu alaykum! Men sizga o'z vazifalaringiz va "
             "story/post bo'yicha eslatma yuborib turaman.\n\n"
+            "📋 /mening — sizga tegishli ishlarni ko'rish\n\n"
             "Eslatma kelganda tugmalar orqali javob berib boring. 🙏")
 
     # Foydalanuvchini ro'yxatga yozish (xato bo'lsa ham menyuga ta'sir qilmaydi)
@@ -1016,30 +1106,39 @@ async def cmd_test_story(update: Update, ctx):
     await update.message.reply_text("▶️ Tekshirilmoqda...")
     groups = get_groups()
 
-    # Diagnostika: qancha guruh topildi?
     if not groups:
         await update.message.reply_text(
-            "⚠️ *Hech qanday aktiv guruh topilmadi!*\n\n"
+            "⚠️ Hech qanday aktiv guruh topilmadi!\n\n"
             "Tekshiring:\n"
-            "• MIJOZ_BOT'da *Guruh ID* to'ldirilganmi?\n"
-            "• *Holat* ustunida 'tugagan/pauza' yo'qmi?\n",
-            parse_mode="Markdown")
+            "• MIJOZ_BOT'da Guruh ID to'ldirilganmi?\n"
+            "• Holat ustunida 'tugagan/pauza' yo'qmi?")
         return
 
-    info = f"✅ *{len(groups)} ta guruh topildi:*\n\n"
+    info = f"✅ {len(groups)} ta guruh topildi:\n\n"
     for g in groups:
         info += (f"👤 {esc(g.get('Mijoz nomi',''))}\n"
-                 f"   Guruh: `{esc(g.get('Guruh ID',''))}`\n"
-                 f"   Storymaker TG: `{esc(g.get('Storymaker TG ID',''))}`\n\n")
-    await update.message.reply_text(info, parse_mode="Markdown")
+                 f"   Guruh: {esc(g.get('Guruh ID',''))}\n"
+                 f"   Storymaker TG: {esc(g.get('Storymaker TG ID',''))}\n\n")
+    await safe_reply(update.message, info)
 
     init_today_tracker()
     await story_notify_group(ctx)
     await update.message.reply_text(
         "📨 Story so'rovi yuborildi!\n\n"
         "Agar guruhga xabar bormasa — bot o'sha guruhga "
-        "*admin* qilib qo'shilganini tekshiring.",
-        parse_mode="Markdown")
+        "admin qilib qo'shilganini tekshiring.")
+
+
+@admin_only
+async def cmd_test_video(update: Update, ctx):
+    """Video/montaj eslatmasini darhol sinash."""
+    await update.message.reply_text("▶️ Video eslatmasi yuborilmoqda...")
+    await video_chain_reminder(ctx)
+    await update.message.reply_text(
+        "📨 Yuborildi! Operator va montajchilarga (VIDEO listdagi "
+        "holati 'Tayyor' bo'lmaganlar) eslatma ketdi.\n\n"
+        "Agar bormasa — Hodimlar sheetda ularning Tg id si "
+        "to'g'ri kiritilganini tekshiring (/davomat).")
 
 
 # ═══════════════════════════════════════════════
@@ -1109,26 +1208,42 @@ async def cmd_ai(update: Update, ctx):
 
 @admin_only
 async def cmd_nazorat(update: Update, ctx):
-    """To'liq nazorat paneli — hozirgi holat."""
+    """To'liq nazorat paneli — hozirgi holat + AI tahlil."""
     m = await update.message.reply_text("⏳ Nazorat paneli yuklanmoqda...")
     s = _collect_status()
-    text = (f"🎛 *NAZORAT PANELI — {today_str()}*\n\n"
-            f"📸 *Story:*\n"
+    text = (f"🎛 NAZORAT PANELI — {today_str()}\n\n"
+            f"📸 Story:\n"
             f"  ✅ To'liq: {s['story_done']}/{s['total']}\n"
             f"  🔸 Qisman: {s['story_partial']}\n"
             f"  ❌ Yo'q: {s['story_none']}\n\n"
-            f"📤 *Post:* {s['post_done']}/{s['total']}\n"
-            f"📋 *Vazifalar:* {s['pending_tasks']} ta bajarilmagan\n")
+            f"📤 Post: {s['post_done']}/{s['total']}\n"
+            f"📋 Vazifalar: {s['pending_tasks']} ta bajarilmagan\n")
     if s["kechikkanlar"]:
-        text += f"\n⚠️ *Kechikkanlar:* " + ", ".join(s["kechikkanlar"])
-    await m.edit_text(text, parse_mode="Markdown")
+        text += f"\n⚠️ Kechikkanlar: " + ", ".join(s["kechikkanlar"])
+
+    # AI nazorat tahlili
+    if GROQ_API_KEY:
+        await safe_reply(m, text + "\n\n🧠 AI tahlil qilmoqda...", edit=True)
+        ai_prompt = (
+            f"SMM agentlik hozirgi holati:\n"
+            f"- {s['total']} mijozdan {s['story_done']} tasi to'liq story berdi\n"
+            f"- {s['story_none']} mijoz umuman story bermadi\n"
+            f"- {s['pending_tasks']} ta vazifa bajarilmagan\n"
+            f"- Kechikkanlar: {', '.join(s['kechikkanlar']) if s['kechikkanlar'] else 'yo''q'}\n\n"
+            f"Direktor sifatida bu holatni baholab, 2-3 qatorda qisqa "
+            f"xulosa va eng muhim 1 ta harakat tavsiyasini ber. O'zbekcha, aniq.")
+        ai = ask_ai(ai_prompt, "Sen tajribali SMM agentlik direktorisan.")
+        if ai and not ai.startswith("⚠️"):
+            text += f"\n\n🧠 AI tahlil:\n{ai}"
+
+    await safe_reply(m, text, edit=True)
 
 
 @admin_only
 async def cmd_davomat(update: Update, ctx):
     """Hodimlarni rol bo'yicha ko'rsatadi (sozlash tekshiruvi)."""
     m = await update.message.reply_text("⏳...")
-    text = "👥 *HODIMLAR (rol bo'yicha):*\n\n"
+    text = "👥 HODIMLAR (rol bo'yicha):\n\n"
     for role, label in [("direktor", "👑 Direktor"), ("smm", "📱 SMM menejer"),
                         ("storymaker", "🎨 Storymaker"), ("operator", "🎥 Operator"),
                         ("montajchi", "✂️ Montajchi")]:
@@ -1137,10 +1252,74 @@ async def cmd_davomat(update: Update, ctx):
             names = ", ".join(f"{esc(s['ism'])}" for s in staff)
             text += f"{label}: {names}\n"
         else:
-            text += f"{label}: _yo'q_ ⚠️\n"
-    text += ("\n💡 Agar kimdir ko'rinmasa — Hodimlar sheetda *Rol* va "
-             "*Tg id* to'g'ri kiritilganini tekshiring.")
-    await m.edit_text(text, parse_mode="Markdown")
+            text += f"{label}: yo'q ⚠️\n"
+    text += ("\n💡 Agar kimdir ko'rinmasa — Hodimlar sheetda Rol va "
+             "Tg id to'g'ri kiritilganini tekshiring.")
+    await safe_reply(m, text, edit=True)
+
+
+async def cmd_mening(update: Update, ctx):
+    """Har bir xodim o'ziga tegishli ishlarni ko'radi (video + vazifa)."""
+    user = update.effective_user
+    uid = str(user.id)
+    m = await update.message.reply_text("⏳...")
+
+    # Bu odam kim? Hodimlar'dan ismini topamiz
+    mening_ism = None
+    for sheet in ("Hodimlar", "JAMOA"):
+        for r in read_sheet(sheet):
+            tg = str(r.get("Tg id") or r.get("Telegram ID") or r.get("TG ID") or "").strip()
+            if tg == uid:
+                mening_ism = str(r.get("Ism", "")).strip()
+                break
+        if mening_ism:
+            break
+
+    if not mening_ism:
+        await safe_reply(m, "❓ Siz hodimlar ro'yxatida topilmadingiz. "
+                            "Admin sizni Hodimlar sheetga qo'shishi kerak.", edit=True)
+        return
+
+    text = f"📋 {esc(mening_ism)} — sizning ishlaringiz:\n\n"
+
+    # Video ishlari (operator yoki montajchi sifatida)
+    book = get_book()
+    video_count = 0
+    if book:
+        try:
+            ws = book.worksheet("VIDEO ISHLAB CHIQARISH")
+            rows = ws.get_all_values()
+            for row in rows[1:]:
+                def cell(i):
+                    return row[i].strip() if i < len(row) else ""
+                mavzu = cell(1)
+                if cell(4) == mening_ism and "Tayyor" not in cell(5) and cell(5):
+                    text += f"  🎥 {esc(mavzu)} (syomka) — 📅 {esc(cell(6))}\n"
+                    video_count += 1
+                if cell(7) == mening_ism and "Tayyor" not in cell(8) and cell(8):
+                    text += f"  ✂️ {esc(mavzu)} (montaj) — 📅 {esc(cell(9))}\n"
+                    video_count += 1
+        except Exception:
+            pass
+
+    # Vazifalar (javobgar sifatida)
+    task_count = 0
+    for r in read_sheet("VAZIFALAR"):
+        b = str(r.get("Bajarildi", ""))
+        if "✅" in b or b.strip().lower() in ("ha", "bajarildi"):
+            continue
+        if str(r.get("Javobgar", "")).strip().lower() == mening_ism.lower():
+            text += f"  📝 {esc(r.get('Vazifa',''))} — 📅 {esc(r.get('Deadline',''))}\n"
+            task_count += 1
+            if task_count >= 15:
+                break
+
+    if video_count == 0 and task_count == 0:
+        text += "✅ Hozircha sizda ochiq ish yo'q. Barakalla! 🎉"
+    else:
+        text += f"\n📊 Jami: {video_count} video + {task_count} vazifa"
+
+    await safe_reply(m, text, edit=True)
 
 
 # ═══════════════════════════════════════════════
@@ -1209,6 +1388,7 @@ def main():
         ("holat", cmd_holat), ("test_story", cmd_test_story),
         ("goya", cmd_goya), ("caption", cmd_caption), ("ai", cmd_ai),
         ("nazorat", cmd_nazorat), ("davomat", cmd_davomat),
+        ("mening", cmd_mening), ("test_video", cmd_test_video),
     ]
     for name, fn in cmds:
         app.add_handler(CommandHandler(name, fn))
