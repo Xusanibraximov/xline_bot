@@ -1,106 +1,77 @@
 # 🎬 X-line Production Manager Bot
 
-Video produksiya kompaniyasi uchun Telegram bot — Google Sheets bilan to'liq integratsiya.
+Video produksiya agentligi uchun **avtonom nazorat boti** — Google Sheets bilan to'liq integratsiya + AI yordamchi.
 
-## ✨ Imkoniyatlar
+## ✨ Bot nima qiladi (mustaqil ishlaydi)
 
-- 📋 Google Sheets dan **real-time** ma'lumot o'qish
-- ☀️ Har kuni 09:00 da bugungi reja (3 ta asosiy vazifa)
-- ✅ Tugma orqali "Bajarildi" statusini Google Sheets ga yozish
-- 🎬 Jarayondagi videolar, kontent kalendar, mijozlar, uchrashuvlar
-- 📊 Umumiy statistika
+### 📸 Story nazorati (2 tomonlama)
+- **9:00, 14:05, 19:05** — mijoz guruhiga "ma'lumot tashlang" (mijozni TG belgilab)
+- **+10 daqiqa** — storymaker'ga "berdimi?" `[Ha/Yo'q]`
+- **Ha** → "nechta?" `[1/2/3]` — 3 ga yetguncha eslatadi
+- **Yo'q** → mijoz guruhiga eslatma + adminga darrov ogohlantirish
 
-## 📱 Buyruqlar
+### 🎬 Video zanjiri
+- **10:30, 15:30** — Operator'ga syomka, Montajchi'ga montaj eslatmasi
+- VIDEO ISHLAB CHIQARISH sheetdagi Holat ustuniga qarab
+
+### 📤 Post & vazifa
+- **17:00** — storymaker'ga "post yuklandimi?"
+- **Har soat** (9–21) — mas'ulga bajarilmagan vazifa eslatmasi
+
+### 💬 Mijozga kunlik aloqa
+- **11:00** — har mijozning shaxsiysiga "savollaringiz bormi?" (agentlik nomidan)
+
+### 👑 Adminga nazorat hisoboti
+- **9:00** — ertalabki reja
+- **20:00** — kechki hisobot + 🧠 AI xulosa (kim qildi, kim qoldirdi)
+- Muammo bo'lsa — darrov ogohlantirish
+
+## 📱 Buyruqlar (faqat admin)
 
 | Buyruq | Vazifasi |
 |--------|----------|
-| `/start` | Bosh menyu |
-| `/today` | Bugungi 3 ta asosiy vazifa (✅ tugma bilan) |
-| `/tasks` | Barcha bajarilmagan vazifalar |
-| `/videos` | Jarayondagi videolar |
-| `/content` | Yaqin 7 kunlik kontent rejasi |
-| `/meetings` | Kutilayotgan uchrashuvlar |
-| `/clients` | Aktiv mijozlar |
-| `/stats` | Umumiy statistika |
+| `/start` | Menyu (admin/oddiy farqlanadi) |
+| `/nazorat` | To'liq nazorat paneli |
+| `/holat` | Bugungi story/post holati |
+| `/davomat` | Hodimlar rollari (sozlash tekshiruvi) |
+| `/today` `/tasks` | Vazifalar |
+| `/videos` `/content` | Video, kontent |
+| `/clients` `/meetings` `/stats` | Mijoz, uchrashuv, statistika |
+| `/goya <brend>` | 🤖 AI story g'oyasi |
+| `/caption <mavzu>` | 🤖 AI caption + hashtag |
+| `/ai <savol>` | 🤖 AI yordamchi |
+| `/setup` `/test_story` | Sozlash, sinash |
 
----
+Storymaker/operator/montajchi faqat **o'ziga tegishli** eslatma oladi — boshqa ma'lumotni ko'rmaydi.
 
-## 🚀 Railway'ga deploy qilish
+## 🔑 Rollar (Hodimlar sheetda `Rol` ustuni)
 
-### 1. Bu reponi Railway'ga ulang
-[railway.app](https://railway.app) → New Project → Deploy from GitHub repo → `xline-bot`
+Bot quyidagi rollarni tushunadi (turli yozilishlarni ham):
+- `Direktor` / `SMM menejer` → admin
+- `Storymaker` → story eslatma
+- `Operator` → syomka eslatma
+- `Montajchi` → montaj eslatma
 
-### 2. Environment Variables qo'shing
-Railway → Variables bo'limida:
+## 🚀 Railway environment variables
 
 | Variable | Qiymat |
 |----------|--------|
-| `TELEGRAM_TOKEN` | @BotFather dan olingan token |
-| `ADMIN_CHAT_ID` | @userinfobot dan olingan ID |
-| `SHEET_ID` | Google Sheets URL dagi ID |
-| `CREDENTIALS_JSON` | Service Account JSON (to'liq matn) |
+| `TELEGRAM_TOKEN` | @BotFather token |
+| `ADMIN_IDS` | `332723689,5107397160` |
+| `SHEET_ID` | Google Sheets ID |
+| `CREDENTIALS_JSON` | Service Account JSON (to'liq) |
+| `GROQ_API_KEY` | console.groq.com key |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` |
 | `TIMEZONE` | `Asia/Samarkand` |
-| `DAILY_HOUR` | `9` |
 
-### 3. Deploy
-Railway avtomatik build qiladi va botni ishga tushiradi.
-
----
-
-## 🔑 Muhim: CREDENTIALS_JSON
-
-`credentials.json` faylni GitHubga **yuklamang** (`.gitignore` da himoyalangan).
-
-Railway'da uning o'rniga `CREDENTIALS_JSON` o'zgaruvchisiga JSON faylning **to'liq ichki matnini** joylang (bitta qatorda yoki ko'p qatorda — ikkalasi ham ishlaydi).
-
-⚠️ **Service Account email** ni Google Sheetga **Editor** sifatida share qilishni unutmang:
-```
-xline-bot@xline-bot.iam.gserviceaccount.com
-```
-
----
+⚠️ Service Account emailni Google Sheetga **Editor** qiling.
+⚠️ Botni har mijoz guruhiga **admin** qilib qo'shing.
 
 ## 💻 Local test
 
 ```bash
-# 1. Kutubxonalar
 pip install -r requirements.txt
-
-# 2. Sozlamalar
-cp .env.example .env
-# .env ni to'ldiring
-
-# 3. credentials.json ni shu papkaga qo'ying
-
-# 4. Ishga tushirish
+cp .env.example .env   # to'ldiring
+# credentials.json ni shu papkaga qo'ying
 python bot.py
-```
-
----
-
-## 📊 Google Sheets tuzilmasi
-
-Bot quyidagi sahifalardan o'qiydi:
-
-- **VAZIFALAR** — `ID, Vazifa, Javobgar, Deadline, Bajarildi, Muhimligi`
-- **VIDEO ISHLAB CHIQARISH** — `ID, Mavzu, Loyiha, Holat, Deadline`
-- **KONTENT KALENDAR** — `Sana, Vaqt, Loyiha, Platforma, Turi, Mavzu, Holat`
-- **MIJOZLAR** — `Mijoz, Platforma, Mas'ul, Yordamchi, Holat`
-- **UCHRASHUVLAR** — `Sana, Vaqt, Kim bilan, Maqsad, Holat`
-
----
-
-## 📁 Fayllar
-
-```
-xline-bot/
-├── bot.py                      # Asosiy kod
-├── requirements.txt            # Kutubxonalar
-├── Dockerfile                  # Container
-├── railway.json                # Railway config
-├── Procfile                    # Zaxira deploy usuli
-├── .gitignore                  # Maxfiy fayllar himoyasi
-├── .env.example                # Sozlamalar namunasi
-├── README.md                   # Bu fayl
-└── .github/workflows/test.yml  # Avtomatik test
 ```
