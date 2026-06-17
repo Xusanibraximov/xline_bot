@@ -817,9 +817,8 @@ def register_bot_user(user) -> None:
 
 async def cmd_start(update: Update, ctx):
     user = update.effective_user
-    # Foydalanuvchini alohida listga yozamiz (Hodimlar'ga emas)
-    register_bot_user(user)
 
+    # Avval menyuni yuboramiz (register xato bersa ham javob bersin)
     if is_admin(user.id):
         await update.message.reply_text(
             "🎬 *X-LINE BOT* (Admin)\n\n"
@@ -843,13 +842,18 @@ async def cmd_start(update: Update, ctx):
             "_Bot mustaqil ishlaydi: story 9/14/19, post 17:00, vazifa har soat._",
             parse_mode="Markdown")
     else:
-        # Oddiy xodim/storymaker uchun — buyruqlar ko'rsatilmaydi
         await update.message.reply_text(
             "🎬 *X-LINE BOT*\n\n"
             "Assalomu alaykum! Men sizga o'z vazifalaringiz va "
             "story/post bo'yicha eslatma yuborib turaman.\n\n"
             "Eslatma kelganda tugmalar orqali javob berib boring. 🙏",
             parse_mode="Markdown")
+
+    # Foydalanuvchini ro'yxatga yozish (xato bo'lsa ham menyuga ta'sir qilmaydi)
+    try:
+        register_bot_user(user)
+    except Exception as e:
+        logger.error(f"register_bot_user (start) xato: {e}")
 
 
 @admin_only
@@ -1184,6 +1188,17 @@ def main():
     for name, fn in cmds:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_cb))
+
+    # Global xato ushlovchi — bot qulamasligi uchun
+    async def error_handler(update, ctx):
+        logger.error(f"❌ Xato: {ctx.error}", exc_info=ctx.error)
+        try:
+            if update and getattr(update, "effective_message", None):
+                await update.effective_message.reply_text(
+                    "⚠️ Xatolik yuz berdi. Qayta urinib ko'ring.")
+        except Exception:
+            pass
+    app.add_error_handler(error_handler)
 
     setup_jobs(app)
     logger.info("🚀 X-LINE BOT ISHGA TUSHDI!")
