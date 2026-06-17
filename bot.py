@@ -43,6 +43,14 @@ ADMIN_CHAT_ID  = int(os.getenv("ADMIN_CHAT_ID", "0"))
 SHEET_ID       = os.getenv("SHEET_ID", "")
 TIMEZONE       = os.getenv("TIMEZONE", "Asia/Samarkand")
 
+# Buyruqlarni ishlata oladigan adminlar (vergul bilan ajratilgan TG ID lar)
+# Masalan: ADMIN_IDS="332723689,5107397160"
+ADMIN_IDS = set()
+for _id in os.getenv("ADMIN_IDS", str(ADMIN_CHAT_ID)).split(","):
+    _id = _id.strip()
+    if _id.isdigit():
+        ADMIN_IDS.add(int(_id))
+
 STORY_HOURS   = [9, 14, 19]   # story eslatma soatlari
 POST_HOUR     = 17            # post eslatma soati
 ASK_DELAY_MIN = 10            # storymaker'dan so'rashdan oldin kutish (daqiqa)
@@ -105,6 +113,26 @@ def esc(text) -> str:
     for ch in ("*", "_", "[", "]", "`"):
         s = s.replace(ch, "")
     return s
+
+
+def is_admin(user_id) -> bool:
+    """Foydalanuvchi admin ekanligini tekshiradi."""
+    try:
+        return int(user_id) in ADMIN_IDS
+    except (ValueError, TypeError):
+        return False
+
+
+def admin_only(func):
+    """Buyruqni faqat adminlar ishlata olishi uchun himoya."""
+    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not user or not is_admin(user.id):
+            await update.message.reply_text(
+                "🔒 Bu buyruq faqat adminlar uchun.")
+            return
+        return await func(update, ctx)
+    return wrapper
 
 
 def read_sheet(tab: str) -> List[Dict]:
@@ -204,18 +232,27 @@ def today_str():
 def _norm_group(r: Dict) -> Dict:
     """MIJOZ_BOT ustunlarini bot ichki nomlariga moslaydi.
 
-    MIJOZ_BOT:  Mijoz ID | Mijoz nomi | Mijoz TG ID | Mas'ul ismi |
-                Mas'ul TG ID | Kunlik kontent | Guruh ID | Holat | ...
+    MIJOZ_BOT:  Mijoz ID | Mijoz nomi | Mijoz TG ID | Masul ismi |
+                Masul TG ID | Kunlik kontent | Guruh ID | Holat | ...
+
+    Eslatma: ustun nomi apostrofli ("Mas'ul") yoki apostrofsiz ("Masul")
+    bo'lishi mumkin — ikkalasini ham qo'llab-quvvatlaymiz.
     """
+    def pick(*names, default=""):
+        for n in names:
+            if n in r and str(r[n]).strip() != "":
+                return r[n]
+        return default
+
     return {
-        "Mijoz ID":          r.get("Mijoz ID", ""),
-        "Mijoz nomi":        r.get("Mijoz nomi", ""),
-        "Guruh ID":          r.get("Guruh ID", ""),
-        "Storymaker nomi":   r.get("Mas'ul ismi", "") or r.get("Mas'ul", ""),
-        "Storymaker TG ID":  r.get("Mas'ul TG ID", ""),
-        "Mijoz TG ID":       r.get("Mijoz TG ID", ""),
-        "Kunlik kontent":    r.get("Kunlik kontent", STORY_TARGET),
-        "Holat":             r.get("Holat", ""),
+        "Mijoz ID":          pick("Mijoz ID"),
+        "Mijoz nomi":        pick("Mijoz nomi"),
+        "Guruh ID":          pick("Guruh ID"),
+        "Storymaker nomi":   pick("Masul ismi", "Mas'ul ismi", "Mas'ul", "Masul"),
+        "Storymaker TG ID":  pick("Masul TG ID", "Mas'ul TG ID", "Masul TG", "Mas'ul TG"),
+        "Mijoz TG ID":       pick("Mijoz TG ID"),
+        "Kunlik kontent":    pick("Kunlik kontent", default=STORY_TARGET),
+        "Holat":             pick("Holat"),
     }
 
 
@@ -336,10 +373,21 @@ async def story_notify_group(ctx: ContextTypes.DEFAULT_TYPE):
         gid = g.get("Guruh ID", "")
         if not gid:
             continue
+
+        mijoz_nomi = esc(g.get("Mijoz nomi", ""))
+        mijoz_tg = str(g.get("Mijoz TG ID", "")).strip()
+
+        # Mijozni TG ID bilan belgilaymiz (bildirishnoma borishi uchun)
+        if mijoz_tg:
+            mention = f"[{mijoz_nomi}](tg://user?id={mijoz_tg})"
+        else:
+            mention = f"*{mijoz_nomi}*"
+
         await send_group(ctx, gid,
-            "🎬 *Story uchun ma'lumot*\n\n"
-            "Assalomu alaykum! Bugun story uchun rasm, video yoki "
-            "ma'lumot tashlab berishingizni so'raymiz. 🙏")
+            f"🎬 *Story uchun ma'lumot*\n\n"
+            f"{mention}, assalomu alaykum! 🙏\n"
+            f"Bugun *story* uchun rasm, video yoki ma'lumot "
+            f"tashlab berishingizni so'raymiz.")
         ctx.job_queue.run_once(
             story_ask_sm, when=ASK_DELAY_MIN * 60,
             data={"mid": mid},
@@ -430,8 +478,14 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             g = next((x for x in get_groups()
                       if str(x.get("Mijoz ID", "")).strip() == str(mid)), None)
             if g and g.get("Guruh ID"):
+                mijoz_nomi = esc(g.get("Mijoz nomi", ""))
+                mijoz_tg = str(g.get("Mijoz TG ID", "")).strip()
+                if mijoz_tg:
+                    mention = f"[{mijoz_nomi}](tg://user?id={mijoz_tg})"
+                else:
+                    mention = f"*{mijoz_nomi}*"
                 await send_group(ctx, g.get("Guruh ID"),
-                    f"⚠️ *{esc(g.get('Mijoz nomi',''))}*, siz hali story uchun ma'lumot "
+                    f"⚠️ {mention}, siz hali story uchun ma'lumot "
                     f"tashlamadingiz. Iltimos, tashlab bering. 🙏")
             await q.edit_message_text("✅ Mijoz guruhiga eslatma yuborildi.")
 
@@ -486,25 +540,62 @@ def _mark_task_done(tid):
 # ═══════════════════════════════════════════════
 #  BUYRUQLAR
 # ═══════════════════════════════════════════════
+def register_bot_user(user) -> None:
+    """/start bosgan odamni 'Bot_userlar' sahifasiga qo'shadi.
+    Ichki Hodimlar listiga TEGINMAYDI.
+    """
+    try:
+        headers = ["TG ID", "Ism", "Username", "Birinchi marta", "Admin"]
+        ws = get_or_create_ws("Bot_userlar", headers)
+        if not ws:
+            return
+        existing = {str(clean_keys(r).get("TG ID", "")).strip()
+                    for r in ws.get_all_records()}
+        uid = str(user.id)
+        if uid not in existing:
+            ws.append_row([
+                uid,
+                user.full_name or "",
+                f"@{user.username}" if user.username else "",
+                datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
+                "Ha" if is_admin(user.id) else "",
+            ])
+    except Exception as e:
+        logger.error(f"register_bot_user xato: {e}")
+
+
 async def cmd_start(update: Update, ctx):
-    await update.message.reply_text(
-        "🎬 *X-LINE BOT*\n\n"
-        "*Buyruqlar:*\n"
-        "📋 /today — bugungi 3 vazifa\n"
-        "🎯 /tasks — barcha vazifalar\n"
-        "🎬 /videos — jarayondagi videolar\n"
-        "📅 /content — yaqin kontent\n"
-        "🤝 /meetings — uchrashuvlar\n"
-        "👥 /clients — mijozlar\n"
-        "📊 /stats — statistika\n\n"
-        "*Kuzatuv:*\n"
-        "📊 /holat — bugungi story/post holati\n"
-        "🔄 /setup — sahifalarni tayyorlash\n"
-        "▶️ /test_story — story sinash\n\n"
-        "_Bot mustaqil ishlaydi: story 9/14/19, post 17:00, vazifa har soat._",
-        parse_mode="Markdown")
+    user = update.effective_user
+    # Foydalanuvchini alohida listga yozamiz (Hodimlar'ga emas)
+    register_bot_user(user)
+
+    if is_admin(user.id):
+        await update.message.reply_text(
+            "🎬 *X-LINE BOT* (Admin)\n\n"
+            "*Buyruqlar:*\n"
+            "📋 /today — bugungi 3 vazifa\n"
+            "🎯 /tasks — barcha vazifalar\n"
+            "🎬 /videos — jarayondagi videolar\n"
+            "📅 /content — yaqin kontent\n"
+            "🤝 /meetings — uchrashuvlar\n"
+            "👥 /clients — mijozlar\n"
+            "📊 /stats — statistika\n"
+            "📊 /holat — bugungi story/post holati\n"
+            "🔄 /setup — sozlash\n"
+            "▶️ /test_story — story sinash\n\n"
+            "_Bot mustaqil ishlaydi: story 9/14/19, post 17:00, vazifa har soat._",
+            parse_mode="Markdown")
+    else:
+        # Oddiy xodim/storymaker uchun — buyruqlar ko'rsatilmaydi
+        await update.message.reply_text(
+            "🎬 *X-LINE BOT*\n\n"
+            "Assalomu alaykum! Men sizga o'z vazifalaringiz va "
+            "story/post bo'yicha eslatma yuborib turaman.\n\n"
+            "Eslatma kelganda tugmalar orqali javob berib boring. 🙏",
+            parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_today(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     tasks = get_vazifalar(3)
@@ -520,6 +611,7 @@ async def cmd_today(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 
+@admin_only
 async def cmd_tasks(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     tasks = get_vazifalar(20)
@@ -532,6 +624,7 @@ async def cmd_tasks(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_videos(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     vids = get_videos()
@@ -544,6 +637,7 @@ async def cmd_videos(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_content(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     cs = get_kontent()
@@ -556,6 +650,7 @@ async def cmd_content(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_meetings(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     us = get_uchrashuvlar()
@@ -568,6 +663,7 @@ async def cmd_meetings(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_clients(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     cs = get_mijozlar()
@@ -582,6 +678,7 @@ async def cmd_clients(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_stats(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     text = ("📊 *STATISTIKA*\n\n"
@@ -593,6 +690,7 @@ async def cmd_stats(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_setup(update: Update, ctx):
     await update.message.reply_text("⏳ Tayyorlanmoqda...")
     ensure_sheets()
@@ -611,6 +709,7 @@ async def cmd_setup(update: Update, ctx):
         parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_holat(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
     rows = [r for r in read_sheet("TRACKER")
@@ -626,11 +725,35 @@ async def cmd_holat(update: Update, ctx):
     await m.edit_text(text, parse_mode="Markdown")
 
 
+@admin_only
 async def cmd_test_story(update: Update, ctx):
-    await update.message.reply_text("▶️ Story so'rovi yuborilmoqda...")
+    await update.message.reply_text("▶️ Tekshirilmoqda...")
+    groups = get_groups()
+
+    # Diagnostika: qancha guruh topildi?
+    if not groups:
+        await update.message.reply_text(
+            "⚠️ *Hech qanday aktiv guruh topilmadi!*\n\n"
+            "Tekshiring:\n"
+            "• MIJOZ_BOT'da *Guruh ID* to'ldirilganmi?\n"
+            "• *Holat* ustunida 'tugagan/pauza' yo'qmi?\n",
+            parse_mode="Markdown")
+        return
+
+    info = f"✅ *{len(groups)} ta guruh topildi:*\n\n"
+    for g in groups:
+        info += (f"👤 {esc(g.get('Mijoz nomi',''))}\n"
+                 f"   Guruh: `{esc(g.get('Guruh ID',''))}`\n"
+                 f"   Storymaker TG: `{esc(g.get('Storymaker TG ID',''))}`\n\n")
+    await update.message.reply_text(info, parse_mode="Markdown")
+
     init_today_tracker()
     await story_notify_group(ctx)
-    await update.message.reply_text("✅ Yuborildi! (guruhlar kiritilgan bo'lsa)")
+    await update.message.reply_text(
+        "📨 Story so'rovi yuborildi!\n\n"
+        "Agar guruhga xabar bormasa — bot o'sha guruhga "
+        "*admin* qilib qo'shilganini tekshiring.",
+        parse_mode="Markdown")
 
 
 # ═══════════════════════════════════════════════
