@@ -469,10 +469,10 @@ async def story_notify_group(ctx: ContextTypes.DEFAULT_TYPE):
             mention = f"*{mijoz_nomi}*"
 
         await send_group(ctx, gid,
-            f"🎬 *Story uchun ma'lumot*\n\n"
-            f"{mention}, assalomu alaykum! 🙏\n"
-            f"Bugun *story* uchun rasm, video yoki ma'lumot "
-            f"tashlab berishingizni so'raymiz.")
+            f"🎬 *Kunlik Storis *\n\n"
+            f"{mention}, charchamayabsizmi? \n"
+            f" *storis* tashlab berish , esingizdan "
+            f"Chiqmasin 😊 .")
         ctx.job_queue.run_once(
             story_ask_sm, when=ASK_DELAY_MIN * 60,
             data={"mid": mid},
