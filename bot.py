@@ -20,6 +20,8 @@ MUSTAQIL KUZATUV (avtomatik):
 import os
 import json
 import logging
+import urllib.request
+import urllib.error
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional
 
@@ -56,6 +58,11 @@ POST_HOUR     = 17            # post eslatma soati
 ASK_DELAY_MIN = 10            # storymaker'dan so'rashdan oldin kutish (daqiqa)
 STORY_TARGET  = 3             # kuniga kerakli story soni
 
+# Groq AI (tekin) — kontent g'oya, caption, hashtag uchun
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -66,6 +73,45 @@ logging.basicConfig(
     format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO
 )
 logger = logging.getLogger("xline")
+
+# ═══════════════════════════════════════════════
+#  GROQ AI (tekin)
+# ═══════════════════════════════════════════════
+def ask_ai(prompt: str, system: str = "") -> str:
+    """Groq AI ga so'rov yuboradi va javob qaytaradi."""
+    if not GROQ_API_KEY:
+        return "⚠️ AI sozlanmagan (GROQ_API_KEY yo'q)."
+    try:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        data = json.dumps({
+            "model": GROQ_MODEL,
+            "messages": messages,
+            "temperature": 0.8,
+            "max_tokens": 1024,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            GROQ_URL, data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result["choices"][0]["message"]["content"].strip()
+    except urllib.error.HTTPError as e:
+        logger.error(f"❌ Groq HTTP xato: {e.code}")
+        return f"⚠️ AI xatosi ({e.code}). Keyinroq urinib ko'ring."
+    except Exception as e:
+        logger.error(f"❌ Groq xato: {e}")
+        return "⚠️ AI bilan bog'lanishda xato."
+
 
 # ═══════════════════════════════════════════════
 #  GOOGLE SHEETS
@@ -436,6 +482,53 @@ def get_person_tg(name):
     return None
 
 
+# Rol nomlarini moslashtirish — turli yozilishlarni bitta standartga keltiradi
+ROLE_ALIASES = {
+    "direktor":    ["direktor", "drektor", "director"],
+    "smm":         ["smm menejer", "smm meneger", "smm", "menejer"],
+    "storymaker":  ["storymaker", "storys maker", "story maker", "storis maker"],
+    "operator":    ["operator", "videograf", "videograph", "syomka"],
+    "montajchi":   ["montajchi", "montajor", "montaj", "editor", "video montajor"],
+}
+
+
+def _match_role(role_text: str) -> str:
+    """Sheetdagi rol matnini standart rolga moslaydi."""
+    rt = str(role_text).strip().lower()
+    for standard, aliases in ROLE_ALIASES.items():
+        for a in aliases:
+            if a in rt:
+                return standard
+    return ""
+
+
+def get_staff_by_role(role: str) -> List[Dict]:
+    """Berilgan rol bo'yicha aktiv hodimlarni qaytaradi.
+    role: 'operator', 'montajchi', 'storymaker', 'smm', 'direktor'
+    """
+    out = []
+    for sheet in ("Hodimlar", "JAMOA"):
+        for r in read_sheet(sheet):
+            rol = r.get("Rol", "")
+            if _match_role(rol) != role:
+                continue
+            tg = r.get("Tg id") or r.get("Telegram ID") or r.get("TG ID")
+            ism = str(r.get("Ism", "")).strip()
+            holat = str(r.get("Holat", "") or r.get("Status", "")).strip().lower()
+            if "tugagan" in holat or "ketgan" in holat or "❌" in holat:
+                continue
+            if tg and str(tg).strip():
+                out.append({"ism": ism, "tg": str(tg).strip(), "rol": role})
+    # Dublikatlarni olib tashlash
+    seen = set()
+    uniq = []
+    for s in out:
+        if s["tg"] not in seen:
+            seen.add(s["tg"])
+            uniq.append(s)
+    return uniq
+
+
 async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
     hour = datetime.now(TZ).hour
     if hour < 9 or hour > 21:   # faqat 09:00–21:00
@@ -453,6 +546,161 @@ async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
         for t in tasks[:10]:
             text += f"  {esc(t.get('Muhimligi',''))} {esc(t.get('Vazifa',''))} — 📅 {esc(t.get('Deadline',''))}\n"
         await send_user(ctx, tg, text)
+
+
+# ═══════════════════════════════════════════════
+#  VIDEO ZANJIRI (operator → montajchi → post)
+# ═══════════════════════════════════════════════
+async def video_chain_reminder(ctx: ContextTypes.DEFAULT_TYPE):
+    """Video bosqichlari bo'yicha tegishli rolga eslatma yuboradi.
+
+    VIDEO ISHLAB CHIQARISH sheetdan Holat ustuniga qarab:
+      - Suratga olish boshlanmagan → Operator'ga
+      - Suratga olish tayyor, Montaj jarayonda/yo'q → Montajchi'ga
+    """
+    videos = read_sheet("VIDEO ISHLAB CHIQARISH")
+    operators = get_staff_by_role("operator")
+    montajchilar = get_staff_by_role("montajchi")
+
+    op_tasks, mo_tasks = [], []
+    for v in videos:
+        holat = str(v.get("Holat", ""))
+        surat = str(v.get("Suratga olish", ""))
+        montaj = str(v.get("Montaj", ""))
+        vid = v.get("ID", "")
+        deadline = v.get("Deadline", "")
+        mavzu = v.get("Mavzu", "") or vid
+
+        if "Tayyor" in holat:
+            continue  # tugagan
+
+        # Syomka hali olinmagan → operator
+        if "Boshlanmagan" in surat or surat.strip() == "":
+            op_tasks.append(f"🎥 {esc(mavzu)} — 📅 {esc(deadline)}")
+        # Syomka bor, montaj yo'q → montajchi
+        elif "Tayyor" in surat and "Tayyor" not in montaj:
+            mo_tasks.append(f"✂️ {esc(mavzu)} — 📅 {esc(deadline)}")
+
+    if op_tasks:
+        for op in operators:
+            text = (f"🎥 *Syomka eslatmasi ({len(op_tasks)} ta):*\n\n"
+                    + "\n".join(op_tasks)
+                    + "\n\nIltimos, syomkalarni rejalashtiring.")
+            await send_user(ctx, op["tg"], text)
+
+    if mo_tasks:
+        for mo in montajchilar:
+            text = (f"✂️ *Montaj eslatmasi ({len(mo_tasks)} ta):*\n\n"
+                    + "\n".join(mo_tasks)
+                    + "\n\nIltimos, montajni davom ettiring.")
+            await send_user(ctx, mo["tg"], text)
+
+
+# ═══════════════════════════════════════════════
+#  MIJOZGA KUNLIK SAVOL (agentlik nomidan)
+# ═══════════════════════════════════════════════
+async def client_daily_checkin(ctx: ContextTypes.DEFAULT_TYPE):
+    """Har mijozning shaxsiysiga kuniga 1 marta 'savollaringiz bormi?' yozadi."""
+    for g in get_groups():
+        mijoz_tg = str(g.get("Mijoz TG ID", "")).strip()
+        if not mijoz_tg:
+            continue
+        nomi = esc(g.get("Mijoz nomi", ""))
+        text = (f"Assalomu alaykum, {nomi}! 🌟\n\n"
+                f"Bu *X-line* jamoasi. Bugun ishlaringiz qanday ketyapti? "
+                f"Kontent yoki loyiha bo'yicha biror savol yoki istagingiz bormi?\n\n"
+                f"Bemalol yozing — yordam beramiz! 🙏")
+        await send_user(ctx, mijoz_tg, text)
+
+
+# ═══════════════════════════════════════════════
+#  NAZORAT HISOBOTLARI (admin uchun)
+# ═══════════════════════════════════════════════
+def _collect_status() -> Dict:
+    """Bugungi umumiy holatni yig'adi."""
+    rows = [r for r in read_sheet("TRACKER")
+            if str(r.get("Sana", "")).strip() == today_str()]
+    groups = get_groups()
+
+    total = len(groups)
+    story_done = sum(1 for r in rows
+                     if int(str(r.get("Story soni", "0") or "0") or 0) >= STORY_TARGET)
+    story_partial = sum(1 for r in rows
+                        if 0 < int(str(r.get("Story soni", "0") or "0") or 0) < STORY_TARGET)
+    story_none = total - story_done - story_partial
+    post_done = sum(1 for r in rows if "yuklandi" in str(r.get("Post holati", "")).lower()
+                    and "yuklanmadi" not in str(r.get("Post holati", "")).lower())
+
+    # Kechikkanlar (story umuman yo'q)
+    kechikkanlar = []
+    for r in rows:
+        cnt = int(str(r.get("Story soni", "0") or "0") or 0)
+        if cnt == 0:
+            kechikkanlar.append(esc(r.get("Mijoz nomi", "")))
+
+    # Vazifalar
+    pending_tasks = sum(1 for r in read_sheet("VAZIFALAR")
+                        if "Yo'q" in str(r.get("Bajarildi", "")))
+
+    return {
+        "total": total, "story_done": story_done, "story_partial": story_partial,
+        "story_none": story_none, "post_done": post_done,
+        "kechikkanlar": kechikkanlar, "pending_tasks": pending_tasks,
+    }
+
+
+async def morning_report(ctx: ContextTypes.DEFAULT_TYPE):
+    """Ertalab 09:00 — bugun nima qilinishi kerak."""
+    init_today_tracker()
+    s = _collect_status()
+    text = (f"🌅 *ERTALABKI HISOBOT — {today_str()}*\n\n"
+            f"📋 Bugun rejada:\n"
+            f"  👥 {s['total']} ta mijoz\n"
+            f"  📸 Har biriga {STORY_TARGET} ta story\n"
+            f"  📋 {s['pending_tasks']} ta bajarilmagan vazifa\n\n"
+            f"Bot bugun avtomatik kuzatadi va kerakli odamlarga eslatadi. 💪")
+    for admin in ADMIN_IDS:
+        await send_user(ctx, admin, text)
+
+
+async def evening_report(ctx: ContextTypes.DEFAULT_TYPE):
+    """Kechqurun 20:00 — bugun nima qilindi, kim qoldirdi + AI xulosa."""
+    s = _collect_status()
+
+    text = (f"🌙 *KECHKI HISOBOT — {today_str()}*\n\n"
+            f"📸 *Story:*\n"
+            f"  ✅ To'liq ({STORY_TARGET} ta): {s['story_done']}/{s['total']}\n"
+            f"  🔸 Qisman: {s['story_partial']}\n"
+            f"  ❌ Umuman yo'q: {s['story_none']}\n\n"
+            f"📤 *Post:* {s['post_done']}/{s['total']} yuklandi\n"
+            f"📋 *Vazifalar:* {s['pending_tasks']} ta bajarilmagan\n")
+
+    if s["kechikkanlar"]:
+        text += f"\n⚠️ *Story bermagan mijozlar:*\n  " + ", ".join(s["kechikkanlar"])
+
+    # AI xulosa (Groq bo'lsa)
+    if GROQ_API_KEY:
+        ai_prompt = (
+            f"SMM agentlik kunlik natijasi: {s['total']} mijozdan "
+            f"{s['story_done']} tasi to'liq story berdi, {s['story_none']} tasi umuman bermadi. "
+            f"{s['pending_tasks']} ta vazifa bajarilmagan. "
+            f"Direktorga 2 qatorda qisqa xulosa va 1 ta maslahat ber. O'zbekcha, samimiy.")
+        ai_text = ask_ai(ai_prompt, "Sen SMM agentlik tahlilchisisan.")
+        if ai_text and not ai_text.startswith("⚠️"):
+            text += f"\n\n🧠 *AI xulosa:*\n{ai_text}"
+
+    for admin in ADMIN_IDS:
+        await send_user(ctx, admin, text)
+
+
+async def instant_alert(ctx: ContextTypes.DEFAULT_TYPE, mijoz_nomi: str, sabab: str):
+    """Muammo bo'lganda darrov adminga ogohlantirish."""
+    text = (f"⚠️ *DARROV OGOHLANTIRISH*\n\n"
+            f"👤 {esc(mijoz_nomi)}\n"
+            f"❗ {esc(sabab)}\n\n"
+            f"🕐 {datetime.now(TZ).strftime('%H:%M')}")
+    for admin in ADMIN_IDS:
+        await send_user(ctx, admin, text)
 
 
 # ═══════════════════════════════════════════════
@@ -487,7 +735,10 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await send_group(ctx, g.get("Guruh ID"),
                     f"⚠️ {mention}, siz hali story uchun ma'lumot "
                     f"tashlamadingiz. Iltimos, tashlab bering. 🙏")
-            await q.edit_message_text("✅ Mijoz guruhiga eslatma yuborildi.")
+                # Darrov adminga ham ogohlantirish
+                await instant_alert(ctx, g.get("Mijoz nomi", ""),
+                                    "Story uchun ma'lumot bermadi")
+            await q.edit_message_text("✅ Mijoz guruhiga eslatma + admin ogohlantirildi.")
 
     elif act == "count":
         cnt, mid = int(parts[1]), parts[2]
@@ -581,8 +832,14 @@ async def cmd_start(update: Update, ctx):
             "👥 /clients — mijozlar\n"
             "📊 /stats — statistika\n"
             "📊 /holat — bugungi story/post holati\n"
+            "🎛 /nazorat — to'liq nazorat paneli\n"
+            "👥 /davomat — hodimlar rollari\n"
             "🔄 /setup — sozlash\n"
             "▶️ /test_story — story sinash\n\n"
+            "*🤖 AI yordamchi:*\n"
+            "💡 /goya — story g'oyalari\n"
+            "✍️ /caption — post caption + hashtag\n"
+            "🤖 /ai — istalgan savol/vazifa\n\n"
             "_Bot mustaqil ishlaydi: story 9/14/19, post 17:00, vazifa har soat._",
             parse_mode="Markdown")
     else:
@@ -757,6 +1014,107 @@ async def cmd_test_story(update: Update, ctx):
 
 
 # ═══════════════════════════════════════════════
+#  AI BUYRUQLARI (Groq)
+# ═══════════════════════════════════════════════
+@admin_only
+async def cmd_goya(update: Update, ctx):
+    """Mijoz uchun story g'oyalari. /goya Fitnes klub"""
+    mavzu = " ".join(ctx.args) if ctx.args else ""
+    if not mavzu:
+        await update.message.reply_text(
+            "💡 *Story g'oyasi*\n\n"
+            "Foydalanish: `/goya <mijoz/brend>`\n"
+            "Misol: `/goya Fitnes klub` yoki `/goya Qurilish kompaniyasi`",
+            parse_mode="Markdown")
+        return
+    m = await update.message.reply_text("🧠 AI o'ylayapti...")
+    system = ("Sen O'zbekistondagi SMM agentlikning kontent menejerisan. "
+              "Instagram story uchun qisqa, amaliy va kreativ g'oyalar berasan. "
+              "O'zbek tilida javob ber.")
+    prompt = (f"'{mavzu}' uchun bugungi 3 ta Instagram story g'oyasi ber. "
+              f"Har biri qisqa (1 qator), aniq va suratga olsa bo'ladigan bo'lsin. "
+              f"Raqamlab yoz.")
+    javob = ask_ai(prompt, system)
+    await m.edit_text(f"💡 *{esc(mavzu)} — story g'oyalari:*\n\n{javob}",
+                      parse_mode="Markdown")
+
+
+@admin_only
+async def cmd_caption(update: Update, ctx):
+    """Post uchun caption. /caption Fitnes - yangi mashg'ulot"""
+    mavzu = " ".join(ctx.args) if ctx.args else ""
+    if not mavzu:
+        await update.message.reply_text(
+            "✍️ *Caption yozish*\n\n"
+            "Foydalanish: `/caption <mavzu>`\n"
+            "Misol: `/caption Fitnes klub yangi yoga darslari`",
+            parse_mode="Markdown")
+        return
+    m = await update.message.reply_text("🧠 AI yozayapti...")
+    system = ("Sen professional SMM kopiraytersan. Instagram post uchun "
+              "jozibali, qisqa caption yozasan. O'zbek tilida, emoji bilan.")
+    prompt = (f"'{mavzu}' mavzusida Instagram post uchun caption yoz. "
+              f"Qisqa (3-4 qator), jozibali, harakatga undovchi (CTA) bilan. "
+              f"Oxirida 5 ta mos hashtag qo'sh.")
+    javob = ask_ai(prompt, system)
+    await m.edit_text(f"✍️ *Caption:*\n\n{javob}", parse_mode="Markdown")
+
+
+@admin_only
+async def cmd_ai(update: Update, ctx):
+    """Umumiy AI yordamchi. /ai <savol>"""
+    savol = " ".join(ctx.args) if ctx.args else ""
+    if not savol:
+        await update.message.reply_text(
+            "🤖 *AI yordamchi*\n\n"
+            "Foydalanish: `/ai <savol yoki vazifa>`\n"
+            "Misol: `/ai mijozga kechikish uchun uzr xati yoz`",
+            parse_mode="Markdown")
+        return
+    m = await update.message.reply_text("🧠 AI o'ylayapti...")
+    system = ("Sen SMM agentlikning aqlli yordamchisisan. "
+              "Qisqa, aniq va amaliy javob berasan. O'zbek tilida.")
+    javob = ask_ai(savol, system)
+    await m.edit_text(f"🤖 {javob}", parse_mode="Markdown")
+
+
+@admin_only
+async def cmd_nazorat(update: Update, ctx):
+    """To'liq nazorat paneli — hozirgi holat."""
+    m = await update.message.reply_text("⏳ Nazorat paneli yuklanmoqda...")
+    s = _collect_status()
+    text = (f"🎛 *NAZORAT PANELI — {today_str()}*\n\n"
+            f"📸 *Story:*\n"
+            f"  ✅ To'liq: {s['story_done']}/{s['total']}\n"
+            f"  🔸 Qisman: {s['story_partial']}\n"
+            f"  ❌ Yo'q: {s['story_none']}\n\n"
+            f"📤 *Post:* {s['post_done']}/{s['total']}\n"
+            f"📋 *Vazifalar:* {s['pending_tasks']} ta bajarilmagan\n")
+    if s["kechikkanlar"]:
+        text += f"\n⚠️ *Kechikkanlar:* " + ", ".join(s["kechikkanlar"])
+    await m.edit_text(text, parse_mode="Markdown")
+
+
+@admin_only
+async def cmd_davomat(update: Update, ctx):
+    """Hodimlarni rol bo'yicha ko'rsatadi (sozlash tekshiruvi)."""
+    m = await update.message.reply_text("⏳...")
+    text = "👥 *HODIMLAR (rol bo'yicha):*\n\n"
+    for role, label in [("direktor", "👑 Direktor"), ("smm", "📱 SMM menejer"),
+                        ("storymaker", "🎨 Storymaker"), ("operator", "🎥 Operator"),
+                        ("montajchi", "✂️ Montajchi")]:
+        staff = get_staff_by_role(role)
+        if staff:
+            names = ", ".join(f"{esc(s['ism'])}" for s in staff)
+            text += f"{label}: {names}\n"
+        else:
+            text += f"{label}: _yo'q_ ⚠️\n"
+    text += ("\n💡 Agar kimdir ko'rinmasa — Hodimlar sheetda *Rol* va "
+             "*Tg id* to'g'ri kiritilganini tekshiring.")
+    await m.edit_text(text, parse_mode="Markdown")
+
+
+# ═══════════════════════════════════════════════
 #  SCHEDULER
 # ═══════════════════════════════════════════════
 def setup_jobs(app: Application):
@@ -771,13 +1129,33 @@ def setup_jobs(app: Application):
     jq.run_daily(_init, time=datetime.now(TZ).replace(
         hour=8, minute=55, second=0, microsecond=0).timetz(), name="init")
 
+    # Ertalabki hisobot (admin) — 09:00
+    jq.run_daily(morning_report, time=datetime.now(TZ).replace(
+        hour=9, minute=0, second=0, microsecond=0).timetz(), name="morning")
+
+    # Story eslatmalari (guruhga) — 9/14/19
     for h in STORY_HOURS:
         jq.run_daily(story_notify_group, time=datetime.now(TZ).replace(
-            hour=h, minute=0, second=0, microsecond=0).timetz(), name=f"story_{h}")
+            hour=h, minute=5, second=0, microsecond=0).timetz(), name=f"story_{h}")
 
+    # Video zanjiri (operator/montajchi) — 10:00 va 15:00
+    for h in (10, 15):
+        jq.run_daily(video_chain_reminder, time=datetime.now(TZ).replace(
+            hour=h, minute=30, second=0, microsecond=0).timetz(), name=f"video_{h}")
+
+    # Mijozga kunlik savol — 11:00
+    jq.run_daily(client_daily_checkin, time=datetime.now(TZ).replace(
+        hour=11, minute=0, second=0, microsecond=0).timetz(), name="client_checkin")
+
+    # Post eslatmasi — 17:00
     jq.run_daily(post_ask, time=datetime.now(TZ).replace(
         hour=POST_HOUR, minute=0, second=0, microsecond=0).timetz(), name="post")
 
+    # Kechki hisobot (admin) + AI xulosa — 20:00
+    jq.run_daily(evening_report, time=datetime.now(TZ).replace(
+        hour=20, minute=0, second=0, microsecond=0).timetz(), name="evening")
+
+    # Vazifa eslatmasi — har soatda
     jq.run_repeating(hourly_tasks, interval=3600, first=120, name="tasks")
     logger.info("✅ Jobs rejalashtirildi")
 
@@ -800,6 +1178,8 @@ def main():
         ("videos", cmd_videos), ("content", cmd_content), ("meetings", cmd_meetings),
         ("clients", cmd_clients), ("stats", cmd_stats), ("setup", cmd_setup),
         ("holat", cmd_holat), ("test_story", cmd_test_story),
+        ("goya", cmd_goya), ("caption", cmd_caption), ("ai", cmd_ai),
+        ("nazorat", cmd_nazorat), ("davomat", cmd_davomat),
     ]
     for name, fn in cmds:
         app.add_handler(CommandHandler(name, fn))
