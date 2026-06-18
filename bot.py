@@ -54,7 +54,7 @@ for _id in os.getenv("ADMIN_IDS", str(ADMIN_CHAT_ID)).split(","):
     if _id.isdigit():
         ADMIN_IDS.add(int(_id))
 
-STORY_HOURS   = [9, 14, 19]   # story eslatma soatlari
+STORY_HOURS   = [8, 14, 18]   # story eslatma soatlari
 POST_HOUR     = 17            # post eslatma soati
 ASK_DELAY_MIN = 10            # storymaker'dan so'rashdan oldin kutish (daqiqa)
 STORY_TARGET  = 3             # kuniga kerakli story soni
@@ -266,16 +266,23 @@ def _parse_date(s: str):
     return None
 
 
-def get_vazifalar(limit=20):
+def get_vazifalar(limit=20, today_only=False):
     data = read_sheet("VAZIFALAR")
+    today = date.today()
     # Bajarilmagan = "✅ Ha" yoki "Bajarildi" bo'lmaganlar
     p = []
     for t in data:
         b = str(t.get("Bajarildi", ""))
         if "✅" in b or b.strip().lower() in ("ha", "bajarildi"):
             continue
-        if str(t.get("Vazifa", "")).strip():
-            p.append(t)
+        if not str(t.get("Vazifa", "")).strip():
+            continue
+        # Faqat bugungi (yoki muddati o'tgan) vazifalar
+        if today_only:
+            d = _parse_date(str(t.get("Deadline", "")))
+            if d and d > today:
+                continue  # kelajakdagi vazifa — bugun ko'rsatmaymiz
+        p.append(t)
     p.sort(key=lambda x: str(x.get("Deadline", "")))
     return p[:limit]
 
@@ -659,11 +666,8 @@ def get_staff_by_role(role: str) -> List[Dict]:
     return uniq
 
 
-async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
-    hour = datetime.now(TZ).hour
-    if hour < 9 or hour > 21:   # faqat 09:00–21:00
-        return
-
+async def daily_tasks(ctx: ContextTypes.DEFAULT_TYPE):
+    """Kuniga 1 marta (17:00) javobgarlarga bugungi vazifalarni eslatadi."""
     today = date.today()
 
     by_person = {}
@@ -1161,7 +1165,7 @@ async def cmd_start(update: Update, ctx):
             "💡 /goya — story g'oyalari\n"
             "✍️ /caption — post caption + hashtag\n"
             "🤖 /ai — istalgan savol/vazifa\n\n"
-            "Bot mustaqil ishlaydi: story 9/14/19, post 17:00, vazifa har soat.")
+            "Bot mustaqil ishlaydi: story 8/14/18, post va vazifa 17:00.")
     else:
         await update.message.reply_text(
             "🎬 X-LINE BOT\n\n"
@@ -1180,11 +1184,11 @@ async def cmd_start(update: Update, ctx):
 @admin_only
 async def cmd_today(update: Update, ctx):
     m = await update.message.reply_text("⏳...")
-    tasks = get_vazifalar(3)
+    tasks = get_vazifalar(limit=10, today_only=True)
     if not tasks:
-        await m.edit_text("✅ Barcha vazifalar bajarilgan! 🎉")
+        await m.edit_text("✅ Bugun uchun bajarilmagan vazifa yo'q! 🎉")
         return
-    text = f"☀️ *BUGUNGI 3 VAZIFA — {datetime.now(TZ):%d-%m-%Y}*\n\n"
+    text = f"☀️ *BUGUNGI VAZIFALAR — {datetime.now(TZ):%d-%m-%Y}*\n\n"
     kb = []
     for t in tasks:
         text += f"{esc(t.get('Muhimligi',''))} *{esc(t.get('Vazifa',''))}*\n   👤 {esc(t.get('Javobgar',''))}  📅 {esc(t.get('Deadline',''))}\n\n"
@@ -1567,7 +1571,7 @@ def setup_jobs(app: Application):
     # Story eslatmalari (guruhga) — 9/14/19
     for h in STORY_HOURS:
         jq.run_daily(story_notify_group, time=datetime.now(TZ).replace(
-            hour=h, minute=5, second=0, microsecond=0).timetz(), name=f"story_{h}")
+            hour=h, minute=0, second=0, microsecond=0).timetz(), name=f"story_{h}")
 
     # Video zanjiri (operator/montajchi) — 10:00 va 15:00
     for h in (10, 15):
@@ -1590,8 +1594,9 @@ def setup_jobs(app: Application):
     jq.run_daily(evening_report, time=datetime.now(TZ).replace(
         hour=20, minute=0, second=0, microsecond=0).timetz(), name="evening")
 
-    # Vazifa eslatmasi — har soatda
-    jq.run_repeating(hourly_tasks, interval=3600, first=120, name="tasks")
+    # Vazifa eslatmasi — kuniga 1 marta, 17:00
+    jq.run_daily(daily_tasks, time=datetime.now(TZ).replace(
+        hour=17, minute=0, second=0, microsecond=0).timetz(), name="tasks")
     logger.info("✅ Jobs rejalashtirildi")
 
 
