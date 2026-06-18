@@ -33,6 +33,7 @@ from google.oauth2.service_account import Credentials as SA
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
+    MessageHandler, filters,
 )
 
 # ═══════════════════════════════════════════════
@@ -60,7 +61,7 @@ STORY_TARGET  = 3             # kuniga kerakli story soni
 
 # Groq AI (tekin) — kontent g'oya, caption, hashtag uchun
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 
 SCOPES = [
@@ -116,6 +117,30 @@ def ask_ai(prompt: str, system: str = "") -> str:
     except Exception as e:
         logger.error(f"❌ Groq xato: {e}")
         return "⚠️ AI bilan bog'lanishda xato."
+
+
+def ask_ai_chat(messages: list) -> str:
+    """Ko'p bosqichli AI suhbat (xabarlar tarixi bilan)."""
+    if not GROQ_API_KEY:
+        return "Hozircha javob bera olmayman."
+    try:
+        data = json.dumps({
+            "model": GROQ_MODEL,
+            "messages": messages,
+            "temperature": 0.8,
+            "max_tokens": 800,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            GROQ_URL, data=data,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {GROQ_API_KEY}"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"❌ AI chat xato: {e}")
+        return "Kechirasiz, hozir javob bera olmadim. Birozdan keyin urinib ko'ring."
 
 
 # ═══════════════════════════════════════════════
@@ -340,6 +365,47 @@ def get_today_row(mid):
     return None
 
 
+def find_client_by_tg(tg_id) -> Optional[Dict]:
+    """Telegram ID bo'yicha mijozni MIJOZ_BOT'dan topadi."""
+    tg_id = str(tg_id).strip()
+    for r in read_sheet("MIJOZ_BOT"):
+        g = _norm_group(r)
+        if str(g.get("Mijoz TG ID", "")).strip() == tg_id:
+            return g
+    return None
+
+
+def save_client_note(mijoz_tg, note: str) -> bool:
+    """Mijoz haqida AI yig'gan ma'lumotni MIJOZ_BOT 'Eslatma' ustuniga yozadi."""
+    try:
+        book = get_book()
+        if not book:
+            return False
+        ws = book.worksheet("MIJOZ_BOT")
+        headers = [h.strip() for h in ws.row_values(1)]
+        # 'Eslatma' yoki 'Izoh' ustunini topamiz
+        col = None
+        for name in ("Eslatma", "Izoh", "Shaxsiyat"):
+            if name in headers:
+                col = headers.index(name) + 1
+                break
+        if not col:
+            return False
+        records = ws.get_all_records()
+        for i, r in enumerate(records, start=2):
+            g = _norm_group(clean_keys(r))
+            if str(g.get("Mijoz TG ID", "")).strip() == str(mijoz_tg).strip():
+                # Mavjud ma'lumotga qo'shamiz
+                eski = str(clean_keys(r).get(headers[col-1], "")).strip()
+                yangi = (eski + " | " + note) if eski else note
+                ws.update_cell(i, col, yangi[:500])  # 500 belgi limit
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"save_client_note xato: {e}")
+        return False
+
+
 def get_story_count(mid):
     r = get_today_row(mid)
     if not r:
@@ -469,10 +535,10 @@ async def story_notify_group(ctx: ContextTypes.DEFAULT_TYPE):
             mention = f"*{mijoz_nomi}*"
 
         await send_group(ctx, gid,
-            f"🎬 *Kunlik Storis *\n\n"
-            f"{mention}, charchamayabsizmi? \n"
-            f" *storis* tashlab berish , esingizdan "
-            f"Chiqmasin 😊 .")
+            f"🎬 *Story uchun ma'lumot*\n\n"
+            f"{mention}, assalomu alaykum! 🙏\n"
+            f"Bugun *story* uchun rasm, video yoki ma'lumot "
+            f"tashlab berishingizni so'raymiz.")
         ctx.job_queue.run_once(
             story_ask_sm, when=ASK_DELAY_MIN * 60,
             data={"mid": mid},
@@ -599,24 +665,17 @@ async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     today = date.today()
-    cutoff = today + timedelta(days=2)   # bugun + 2 kun ichidagi vazifalar
 
     by_person = {}
     for r in read_sheet("VAZIFALAR"):
-        if "Yo'q" not in str(r.get("Bajarildi", "")) and \
-           "Bajarildi" not in str(r.get("Bajarildi", "")) and \
-           "✅" not in str(r.get("Bajarildi", "")):
-            # Bajarilmagan (Jarayonda yoki boshqa) — davom etamiz
-            pass
-        # Faqat bajarilmaganlarni olamiz (✅ Ha bo'lmaganlar)
         bajarildi = str(r.get("Bajarildi", ""))
         if "✅" in bajarildi or bajarildi.strip() == "Ha":
             continue
 
-        # Deadline 2 kun ichidami?
+        # Faqat BUGUNGI yoki muddati o'tgan vazifalar (kelajak emas)
         d = _parse_date(str(r.get("Deadline", "")))
-        if d and d > cutoff:
-            continue  # 2 kundan uzoq — hozircha eslatmaymiz
+        if d and d > today:
+            continue
 
         p = str(r.get("Javobgar", "")).strip()
         by_person.setdefault(p, []).append(r)
@@ -625,12 +684,11 @@ async def hourly_tasks(ctx: ContextTypes.DEFAULT_TYPE):
         tg = get_person_tg(person)
         if not tg:
             continue
-        # Deadline bo'yicha saralash
         tasks.sort(key=lambda x: _parse_date(str(x.get("Deadline", ""))) or date.max)
-        text = f"⏰ Yaqin 2 kunlik vazifalar ({len(tasks)} ta):\n\n"
+        text = f"⏰ Bugungi vazifalar ({len(tasks)} ta):\n\n"
         for t in tasks[:15]:
             d = _parse_date(str(t.get("Deadline", "")))
-            belgi = "🔴" if d and d <= today else "🟡"
+            belgi = "🔴" if d and d < today else "🟢"
             text += f"  {belgi} {esc(t.get('Vazifa',''))} — 📅 {esc(t.get('Deadline',''))}\n"
         await send_user(ctx, tg, text)
 
@@ -728,6 +786,41 @@ async def client_daily_checkin(ctx: ContextTypes.DEFAULT_TYPE):
         await send_user(ctx, mijoz_tg, text)
 
 
+async def treyl_reminder(ctx: ContextTypes.DEFAULT_TYPE):
+    """Har kuni Husanboy (SMM menejer)ga barcha mijozlar ro'yxati bilan
+    'Instagram'ga treyl video qo'y' eslatmasini yuboradi.
+    """
+    groups = get_groups()
+    if not groups:
+        return
+
+    # Mijozlar ro'yxatini tuzamiz
+    mijoz_list = "\n".join(
+        f"  {i}. {esc(g.get('Mijoz nomi', ''))}"
+        for i, g in enumerate(groups, 1)
+    )
+
+    text = (f"🎬 Treyl video eslatmasi\n\n"
+            f"Bugun quyidagi mijozlar uchun Instagram'ga treyl video "
+            f"yuklash kerak:\n\n{mijoz_list}\n\n"
+            f"Tayyor bo'lganda tugmani bosing 👇")
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Treyllar yuklandi", callback_data="treyl::done"),
+    ]])
+
+    # SMM menejerga (Husanboy) yuboramiz
+    smm_staff = get_staff_by_role("smm")
+    sent = False
+    for s in smm_staff:
+        await send_user(ctx, s["tg"], text, keyboard)
+        sent = True
+    # Agar SMM topilmasa — adminlarga
+    if not sent:
+        for admin in ADMIN_IDS:
+            await send_user(ctx, admin, text, keyboard)
+
+
 # ═══════════════════════════════════════════════
 #  NAZORAT HISOBOTLARI (admin uchun)
 # ═══════════════════════════════════════════════
@@ -819,6 +912,114 @@ async def instant_alert(ctx: ContextTypes.DEFAULT_TYPE, mijoz_nomi: str, sabab: 
 
 
 # ═══════════════════════════════════════════════
+#  AI SUHBAT (shaxsiy chatda)
+# ═══════════════════════════════════════════════
+# Suhbat tarixini xotirada saqlaymiz (user_id -> [messages])
+_chat_history: Dict[int, list] = {}
+
+CLIENT_SYSTEM = (
+    "Sen X-line nomli O'zbekistondagi video produksiya va SMM agentligining "
+    "professional, samimiy yordamchisisan. Mijozlar bilan o'zbek tilida, "
+    "hurmat bilan, qisqa va aniq gaplashasan. Mijozning savollariga javob berasan, "
+    "kontent, video, story, reklama bo'yicha maslahat berasan. "
+    "Suhbat davomida mijozning biznesi, mahsuloti, maqsadli auditoriyasi va "
+    "uslubini bilib olishga harakat qil — bu kontent yaratishga yordam beradi. "
+    "Lekin so'roq qilayotgandek emas, tabiiy suhbat tarzida. "
+    "Javoblaring qisqa bo'lsin (2-4 jumla), emoji ishlatishing mumkin."
+)
+
+ADMIN_SYSTEM = (
+    "Sen X-line SMM agentligining aqlli ish yordamchisisan. Agentlik rahbari "
+    "(admin) bilan o'zbek tilida gaplashasan. Kontent g'oyalari, marketing "
+    "strategiyasi, matn yozish, tahlil — har qanday ish bo'yicha yordam berasan. "
+    "Qisqa, aniq va amaliy javob ber."
+)
+
+
+async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Shaxsiy chatdagi oddiy xabarlarga AI javob beradi.
+    Guruhlarda ishlamaydi (faqat eslatma/buyruq)."""
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    # Faqat shaxsiy chat (guruhda AI javob bermaydi)
+    if update.effective_chat.type != "private":
+        return
+
+    user = update.effective_user
+    uid = user.id
+    user_text = msg.text.strip()
+
+    # Buyruq bo'lsa o'tkazib yuboramiz (ular alohida ishlaydi)
+    if user_text.startswith("/"):
+        return
+
+    # Bu kim? Admin, mijoz yoki noma'lum?
+    is_adm = is_admin(uid)
+    client = find_client_by_tg(uid)
+
+    # Faqat admin yoki ro'yxatdagi mijoz bilan AI gaplashadi
+    if not is_adm and not client:
+        # Noma'lum odam — AI sarflamaymiz, qisqa javob
+        await msg.reply_text(
+            "Assalomu alaykum! Bu X-line agentligi boti. "
+            "Sizning ma'lumotlaringiz tizimda topilmadi. "
+            "Iltimos, menejeringizga murojaat qiling. 🙏")
+        return
+
+    # Suhbat tarixini olamiz/boshlaymiz
+    if uid not in _chat_history:
+        system = ADMIN_SYSTEM if is_adm else CLIENT_SYSTEM
+        # Mijoz bo'lsa, uning ismini system'ga qo'shamiz
+        if client:
+            nomi = client.get("Mijoz nomi", "")
+            system += f"\n\nHozir siz '{nomi}' ismli mijoz bilan gaplashyapsiz."
+        _chat_history[uid] = [{"role": "system", "content": system}]
+
+    _chat_history[uid].append({"role": "user", "content": user_text})
+
+    # Tarix juda uzun bo'lsa, eskisini qisqartiramiz (system + oxirgi 10 xabar)
+    if len(_chat_history[uid]) > 12:
+        _chat_history[uid] = [_chat_history[uid][0]] + _chat_history[uid][-10:]
+
+    # "yozyapti..." ko'rsatamiz
+    await ctx.bot.send_chat_action(chat_id=uid, action="typing")
+
+    # AI javobini olamiz
+    javob = ask_ai_chat(_chat_history[uid])
+    _chat_history[uid].append({"role": "assistant", "content": javob})
+
+    await msg.reply_text(javob)
+
+    # Mijoz bo'lsa — suhbatdan ma'lumot yig'ib, jadvalga yozamiz (har 4-xabarda)
+    if client and len([m for m in _chat_history[uid] if m["role"] == "user"]) % 4 == 0:
+        await _extract_and_save_client_info(uid, client)
+
+
+async def _extract_and_save_client_info(uid, client):
+    """Suhbatdan mijoz haqida muhim ma'lumotni ajratib, jadvalga yozadi."""
+    try:
+        # Suhbatdagi mijoz xabarlarini yig'amiz
+        user_msgs = "\n".join(
+            m["content"] for m in _chat_history.get(uid, [])
+            if m["role"] == "user"
+        )
+        if not user_msgs:
+            return
+        prompt = (
+            f"Quyida mijoz bilan suhbat. Mijoz haqida muhim faktlarni "
+            f"(biznesi, mahsuloti, maqsadi, uslubi, talablari) 1 qatorda, "
+            f"qisqa konspekt qilib yoz. Faqat faktlar, ortiqcha gap yo'q:\n\n{user_msgs}")
+        xulosa = ask_ai(prompt, "Sen ma'lumot yig'uvchi yordamchisan.")
+        if xulosa and not xulosa.startswith("⚠️"):
+            mijoz_tg = str(client.get("Mijoz TG ID", "")).strip()
+            save_client_note(mijoz_tg, xulosa)
+    except Exception as e:
+        logger.error(f"client info yig'ish xato: {e}")
+
+
+# ═══════════════════════════════════════════════
 #  CALLBACK
 # ═══════════════════════════════════════════════
 async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -886,6 +1087,11 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(f"✅ Vazifa {tid} bajarildi!")
         else:
             await q.message.reply_text(f"⚠️ {tid} topilmadi.")
+
+    elif act == "treyl":
+        # Treyl yuklandi tugmasi
+        await q.edit_message_reply_markup(reply_markup=None)
+        await q.message.reply_text("✅ Treyllar yuklandi deb belgilandi! Rahmat. 🎬")
 
 
 def _mark_task_done(tid):
@@ -1141,6 +1347,23 @@ async def cmd_test_video(update: Update, ctx):
         "to'g'ri kiritilganini tekshiring (/davomat).")
 
 
+@admin_only
+async def cmd_test_treyl(update: Update, ctx):
+    """Treyl eslatmasini darhol sinash."""
+    await update.message.reply_text("▶️ Treyl eslatmasi yuborilmoqda...")
+    await treyl_reminder(ctx)
+    await update.message.reply_text("📨 Yuborildi! (SMM menejer yoki adminlarga)")
+
+
+async def cmd_suhbat_tozala(update: Update, ctx):
+    """AI suhbat tarixini tozalaydi (yangi suhbat boshlash)."""
+    uid = update.effective_user.id
+    if uid in _chat_history:
+        del _chat_history[uid]
+    await update.message.reply_text(
+        "🧹 Suhbat tarixi tozalandi. Yangi suhbat boshlashingiz mumkin.")
+
+
 # ═══════════════════════════════════════════════
 #  AI BUYRUQLARI (Groq)
 # ═══════════════════════════════════════════════
@@ -1355,6 +1578,10 @@ def setup_jobs(app: Application):
     jq.run_daily(client_daily_checkin, time=datetime.now(TZ).replace(
         hour=11, minute=0, second=0, microsecond=0).timetz(), name="client_checkin")
 
+    # Treyl video eslatmasi (Husanboyga) — har kuni 09:30
+    jq.run_daily(treyl_reminder, time=datetime.now(TZ).replace(
+        hour=9, minute=30, second=0, microsecond=0).timetz(), name="treyl")
+
     # Post eslatmasi — 17:00
     jq.run_daily(post_ask, time=datetime.now(TZ).replace(
         hour=POST_HOUR, minute=0, second=0, microsecond=0).timetz(), name="post")
@@ -1389,10 +1616,14 @@ def main():
         ("goya", cmd_goya), ("caption", cmd_caption), ("ai", cmd_ai),
         ("nazorat", cmd_nazorat), ("davomat", cmd_davomat),
         ("mening", cmd_mening), ("test_video", cmd_test_video),
+        ("test_treyl", cmd_test_treyl), ("suhbat_tozala", cmd_suhbat_tozala),
     ]
     for name, fn in cmds:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_cb))
+    # AI suhbat — shaxsiy chatdagi oddiy xabarlar (buyruq emas)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, on_message))
 
     # Global xato ushlovchi — bot qulamasligi uchun
     async def error_handler(update, ctx):
