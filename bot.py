@@ -1582,9 +1582,9 @@ def setup_jobs(app: Application):
     jq.run_daily(client_daily_checkin, time=datetime.now(TZ).replace(
         hour=11, minute=0, second=0, microsecond=0).timetz(), name="client_checkin")
 
-    # Treyl video eslatmasi (Husanboyga) — har kuni 09:30
+    # Treyl video eslatmasi (Husanboyga) — har kuni 17:30
     jq.run_daily(treyl_reminder, time=datetime.now(TZ).replace(
-        hour=9, minute=30, second=0, microsecond=0).timetz(), name="treyl")
+        hour=17, minute=30, second=0, microsecond=0).timetz(), name="treyl")
 
     # Post eslatmasi — 17:00
     jq.run_daily(post_ask, time=datetime.now(TZ).replace(
