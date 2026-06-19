@@ -59,10 +59,48 @@ POST_HOUR     = 17            # post eslatma soati
 ASK_DELAY_MIN = 10            # storymaker'dan so'rashdan oldin kutish (daqiqa)
 STORY_TARGET  = 3             # kuniga kerakli story soni
 
-# Groq AI (tekin) — kontent g'oya, caption, hashtag uchun
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# ═══════════════════════════════════════════════
+#  AI SOZLAMALARI (universal — Groq / DeepSeek / Claude)
+# ═══════════════════════════════════════════════
+# AI_PROVIDER: "groq" | "deepseek" | "claude" (qaysi xizmatni ishlatish)
+# Agar bo'sh bo'lsa — qaysi key topilsa o'shani avtomatik tanlaydi.
+AI_PROVIDER = os.getenv("AI_PROVIDER", "").strip().lower()
+
+# Har bir provider uchun key va sozlamalar
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+CLAUDE_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "") or os.getenv("CLAUDE_API_KEY", "")
+
+# Model nomlari (xohlasangiz Railway'dan o'zgartirasiz)
+GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+CLAUDE_MODEL   = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+# API manzillari
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+CLAUDE_URL   = "https://api.anthropic.com/v1/messages"
+
+
+def _active_provider():
+    """Qaysi AI provider ishlatilishini aniqlaydi.
+    Avval AI_PROVIDER sozlamasiga qaraydi, keyin mavjud key'ga.
+    """
+    if AI_PROVIDER == "groq" and GROQ_API_KEY:
+        return "groq"
+    if AI_PROVIDER == "deepseek" and DEEPSEEK_API_KEY:
+        return "deepseek"
+    if AI_PROVIDER == "claude" and CLAUDE_API_KEY:
+        return "claude"
+    # Avtomatik: qaysi key bor bo'lsa
+    if GROQ_API_KEY:
+        return "groq"
+    if DEEPSEEK_API_KEY:
+        return "deepseek"
+    if CLAUDE_API_KEY:
+        return "claude"
+    return None
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -78,69 +116,96 @@ logger = logging.getLogger("xline")
 # ═══════════════════════════════════════════════
 #  GROQ AI (tekin)
 # ═══════════════════════════════════════════════
-def ask_ai(prompt: str, system: str = "") -> str:
-    """Groq AI ga so'rov yuboradi va javob qaytaradi."""
-    if not GROQ_API_KEY:
-        return "⚠️ AI sozlanmagan (GROQ_API_KEY yo'q)."
+# ═══════════════════════════════════════════════
+def _ai_request(messages: list, temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    """Universal AI so'rov — Groq, DeepSeek yoki Claude bilan ishlaydi.
+    Provider _active_provider() orqali aniqlanadi.
+    """
+    provider = _active_provider()
+    if not provider:
+        return "⚠️ AI sozlanmagan (hech qanday API key topilmadi)."
+
     try:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        # ── Claude (Anthropic) — boshqacha format ──
+        if provider == "claude":
+            # System xabarni ajratamiz (Claude alohida system maydonini oladi)
+            system_text = ""
+            chat_msgs = []
+            for m in messages:
+                if m["role"] == "system":
+                    system_text = m["content"]
+                else:
+                    chat_msgs.append(m)
+            body = {
+                "model": CLAUDE_MODEL,
+                "max_tokens": max_tokens,
+                "messages": chat_msgs,
+            }
+            if system_text:
+                body["system"] = system_text
+            data = json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(
+                CLAUDE_URL, data=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": CLAUDE_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                },
+                method="POST")
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result["content"][0]["text"].strip()
+
+        # ── Groq va DeepSeek — OpenAI-uslubidagi format (bir xil) ──
+        if provider == "groq":
+            url, key, model = GROQ_URL, GROQ_API_KEY, GROQ_MODEL
+        else:  # deepseek
+            url, key, model = DEEPSEEK_URL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL
 
         data = json.dumps({
-            "model": GROQ_MODEL,
+            "model": model,
             "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 1024,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
         }).encode("utf-8")
-
         req = urllib.request.Request(
-            GROQ_URL, data=data,
+            url, data=data,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Authorization": f"Bearer {key}",
             },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+            method="POST")
+        with urllib.request.urlopen(req, timeout=40) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             return result["choices"][0]["message"]["content"].strip()
+
     except urllib.error.HTTPError as e:
-        # Xatoning aniq sababini logga yozamiz (model nomi, key muammosi va h.k.)
         try:
             err_body = e.read().decode("utf-8")
         except Exception:
             err_body = ""
-        logger.error(f"❌ Groq HTTP {e.code}: {err_body[:300]}")
+        logger.error(f"❌ {provider} HTTP {e.code}: {err_body[:300]}")
         return f"⚠️ AI xatosi ({e.code})."
     except Exception as e:
-        logger.error(f"❌ Groq xato: {e}")
+        logger.error(f"❌ {provider} xato: {e}")
         return "⚠️ AI bilan bog'lanishda xato."
 
 
+def ask_ai(prompt: str, system: str = "") -> str:
+    """Bitta savol-javob (universal)."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    return _ai_request(messages, temperature=0.7, max_tokens=1024)
+
+
 def ask_ai_chat(messages: list) -> str:
-    """Ko'p bosqichli AI suhbat (xabarlar tarixi bilan)."""
-    if not GROQ_API_KEY:
-        return "Hozircha javob bera olmayman."
-    try:
-        data = json.dumps({
-            "model": GROQ_MODEL,
-            "messages": messages,
-            "temperature": 0.8,
-            "max_tokens": 800,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            GROQ_URL, data=data,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {GROQ_API_KEY}"},
-            method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.error(f"❌ AI chat xato: {e}")
+    """Ko'p bosqichli suhbat (universal)."""
+    result = _ai_request(messages, temperature=0.8, max_tokens=800)
+    if result.startswith("⚠️"):
         return "Kechirasiz, hozir javob bera olmadim. Birozdan keyin urinib ko'ring."
+    return result
 
 
 # ═══════════════════════════════════════════════
@@ -908,7 +973,7 @@ async def evening_report(ctx: ContextTypes.DEFAULT_TYPE):
         text += f"\n⚠️ *Story bermagan mijozlar:*\n  " + ", ".join(s["kechikkanlar"])
 
     # AI xulosa (Groq bo'lsa)
-    if GROQ_API_KEY:
+    if _active_provider():
         ai_prompt = (
             f"SMM agentlik kunlik natijasi: {s['total']} mijozdan "
             f"{s['story_done']} tasi to'liq story berdi, {s['story_none']} tasi umuman bermadi. "
@@ -982,20 +1047,43 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Faqat admin yoki ro'yxatdagi mijoz bilan AI gaplashadi
     if not is_adm and not client:
-        # Noma'lum odam — AI sarflamaymiz, qisqa javob
         await msg.reply_text(
             "Assalomu alaykum! Bu X-line agentligi boti. "
             "Sizning ma'lumotlaringiz tizimda topilmadi. "
             "Iltimos, menejeringizga murojaat qiling. 🙏")
         return
 
+    # ── BIRINCHI MARTA yozayotgan mijoz — chuqur tanishuv ──
+    birinchi_marta = uid not in _chat_history
+
     # Suhbat tarixini olamiz/boshlaymiz
-    if uid not in _chat_history:
-        system = ADMIN_SYSTEM if is_adm else CLIENT_SYSTEM
-        # Mijoz bo'lsa, uning ismini system'ga qo'shamiz
-        if client:
-            nomi = client.get("Mijoz nomi", "")
-            system += f"\n\nHozir siz '{nomi}' ismli mijoz bilan gaplashyapsiz."
+    if birinchi_marta:
+        if is_adm:
+            system = ADMIN_SYSTEM
+        else:
+            # Mijoz uchun — chuqur analiz qiladigan system
+            nomi = client.get("Mijoz nomi", "") if client else ""
+            # Mijoz haqida oldindan yig'ilgan ma'lumot (Eslatma ustuni)
+            eski_malumot = ""
+            for r in read_sheet("MIJOZ_BOT"):
+                g = _norm_group(r)
+                if str(g.get("Mijoz TG ID", "")).strip() == str(uid):
+                    for key in ("Eslatma", "Izoh", "Shaxsiyat"):
+                        v = str(r.get(key, "")).strip()
+                        if v:
+                            eski_malumot = v
+                            break
+                    break
+
+            system = CLIENT_SYSTEM + f"\n\nHozir siz '{nomi}' ismli mijoz bilan gaplashyapsiz."
+            if eski_malumot:
+                system += (f"\n\nBu mijoz haqida avval yig'ilgan ma'lumot: {eski_malumot}. "
+                           f"Shuni inobatga olib, uni allaqachon tanigandek muloqot qil.")
+            else:
+                system += ("\n\nBu mijoz bilan BIRINCHI marta gaplashyapsan. "
+                           "Iliq salomlash, o'zingni X-line yordamchisi sifatida tanishtir, "
+                           "va uning biznesi, sohasi, mahsuloti haqida tabiiy tarzda so'rab bil. "
+                           "Bu ma'lumot keyinchalik unga sohasiga mos yordam berishga kerak bo'ladi.")
         _chat_history[uid] = [{"role": "system", "content": system}]
 
     _chat_history[uid].append({"role": "user", "content": user_text})
@@ -1013,9 +1101,12 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await msg.reply_text(javob)
 
-    # Mijoz bo'lsa — suhbatdan ma'lumot yig'ib, jadvalga yozamiz (har 4-xabarda)
-    if client and len([m for m in _chat_history[uid] if m["role"] == "user"]) % 4 == 0:
-        await _extract_and_save_client_info(uid, client)
+    # Mijoz bo'lsa — suhbatdan ma'lumot yig'ib, jadvalga yozamiz
+    # (birinchi suhbatda darrov, keyin har 4-xabarda)
+    if client:
+        user_msg_count = len([m for m in _chat_history[uid] if m["role"] == "user"])
+        if user_msg_count == 2 or user_msg_count % 4 == 0:
+            await _extract_and_save_client_info(uid, client)
 
 
 async def _extract_and_save_client_info(uid, client):
@@ -1466,7 +1557,7 @@ async def cmd_nazorat(update: Update, ctx):
         text += f"\n⚠️ Kechikkanlar: " + ", ".join(s["kechikkanlar"])
 
     # AI nazorat tahlili
-    if GROQ_API_KEY:
+    if _active_provider():
         await safe_reply(m, text + "\n\n🧠 AI tahlil qilmoqda...", edit=True)
         ai_prompt = (
             f"SMM agentlik hozirgi holati:\n"
@@ -1500,6 +1591,31 @@ async def cmd_davomat(update: Update, ctx):
     text += ("\n💡 Agar kimdir ko'rinmasa — Hodimlar sheetda Rol va "
              "Tg id to'g'ri kiritilganini tekshiring.")
     await safe_reply(m, text, edit=True)
+
+
+@admin_only
+async def cmd_ai_holat(update: Update, ctx):
+    """Qaysi AI provider faolligini ko'rsatadi (debug)."""
+    provider = _active_provider()
+    if not provider:
+        await update.message.reply_text(
+            "❌ Hech qanday AI key topilmadi.\n\n"
+            "Railway'da quyidagidan birini qo'shing:\n"
+            "• GROQ_API_KEY (tekin)\n"
+            "• DEEPSEEK_API_KEY\n"
+            "• ANTHROPIC_API_KEY")
+        return
+    model = {"groq": GROQ_MODEL, "deepseek": DEEPSEEK_MODEL,
+             "claude": CLAUDE_MODEL}.get(provider, "?")
+    await update.message.reply_text("⏳ AI sinab ko'rilmoqda...")
+    test = ask_ai("Bir so'z bilan javob ber: ishlayapsanmi?", "")
+    holat = "✅ ishlayapti" if not test.startswith("⚠️") else "❌ xato"
+    await update.message.reply_text(
+        f"🤖 AI HOLATI\n\n"
+        f"Provider: {provider}\n"
+        f"Model: {model}\n"
+        f"Holat: {holat}\n\n"
+        f"Test javob: {test[:100]}")
 
 
 async def cmd_mening(update: Update, ctx):
@@ -1601,7 +1717,7 @@ def setup_jobs(app: Application):
 
     # Treyl video eslatmasi (Husanboyga) — har kuni 09:30
     jq.run_daily(treyl_reminder, time=datetime.now(TZ).replace(
-        hour=17, minute=00, second=0, microsecond=0).timetz(), name="treyl")
+        hour=9, minute=30, second=0, microsecond=0).timetz(), name="treyl")
 
     # Post eslatmasi — 17:00
     jq.run_daily(post_ask, time=datetime.now(TZ).replace(
@@ -1637,6 +1753,7 @@ def main():
         ("holat", cmd_holat), ("test_story", cmd_test_story),
         ("goya", cmd_goya), ("caption", cmd_caption), ("ai", cmd_ai),
         ("nazorat", cmd_nazorat), ("davomat", cmd_davomat),
+        ("ai_holat", cmd_ai_holat),
         ("mening", cmd_mening), ("test_video", cmd_test_video),
         ("test_treyl", cmd_test_treyl), ("suhbat_tozala", cmd_suhbat_tozala),
     ]
