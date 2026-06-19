@@ -258,9 +258,14 @@ def ensure_sheets():
 #  DATA — asosiy sahifalar (buyruqlar uchun)
 # ═══════════════════════════════════════════════
 def _parse_date(s: str):
-    for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y"):
+    # MUHIM: kun/oy/yil (18/06/2026) BIRINCHI — bu O'zbekiston formati.
+    # Aks holda 02/07 (2-iyul) noto'g'ri 7-fevral deb o'qiladi.
+    s = str(s).strip()
+    if not s:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y", "%d-%m-%Y", "%m/%d/%Y"):
         try:
-            return datetime.strptime(s.strip(), fmt).date()
+            return datetime.strptime(s, fmt).date()
         except ValueError:
             continue
     return None
@@ -283,7 +288,9 @@ def get_vazifalar(limit=20, today_only=False):
             if d and d > today:
                 continue  # kelajakdagi vazifa — bugun ko'rsatmaymiz
         p.append(t)
-    p.sort(key=lambda x: str(x.get("Deadline", "")))
+    # Sanani HAQIQIY sana sifatida saralaymiz (matn emas!)
+    # Sanasi yo'qlar oxiriga tushadi
+    p.sort(key=lambda x: _parse_date(str(x.get("Deadline", ""))) or date.max)
     return p[:limit]
 
 
@@ -720,6 +727,9 @@ async def video_chain_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     if len(rows) < 2:
         return
 
+    today = date.today()
+    cutoff = today + timedelta(days=1)   # bugun + ertaga (eng yaqin kun)
+
     # Har bir operator/montajchi uchun vazifalarni yig'amiz
     op_tasks = {}   # ism -> [matnlar]
     mo_tasks = {}
@@ -740,15 +750,22 @@ async def video_chain_reminder(ctx: ContextTypes.DEFAULT_TYPE):
         if not mavzu:
             continue
 
-        # Operator: holati "Tayyor" bo'lmasa eslatadi
+        # Operator: holati "Tayyor" bo'lmasa VA deadline bugun/ertaga bo'lsa
         if operator and "Tayyor" not in op_holat and op_holat:
-            op_tasks.setdefault(operator, []).append(
-                f"🎥 {esc(mavzu)} — {esc(op_holat)} — 📅 {esc(op_deadline)}")
+            d = _parse_date(op_deadline)
+            # Deadline yo'q yoki bugun/ertaga/o'tib ketgan bo'lsa eslatadi
+            if not d or d <= cutoff:
+                kun_belgi = "🔴 BUGUN" if d == today else ("🟡 Ertaga" if d == cutoff else ("⚠️ Muddati o'tgan" if d and d < today else "📅"))
+                op_tasks.setdefault(operator, []).append(
+                    f"🎥 {esc(mavzu)} — {esc(op_holat)} — {kun_belgi} {esc(op_deadline)}")
 
-        # Montajchi: holati "Tayyor" bo'lmasa eslatadi
+        # Montajchi: holati "Tayyor" bo'lmasa VA deadline bugun/ertaga bo'lsa
         if montajchi and "Tayyor" not in mo_holat and mo_holat:
-            mo_tasks.setdefault(montajchi, []).append(
-                f"✂️ {esc(mavzu)} — {esc(mo_holat)} — 📅 {esc(mo_deadline)}")
+            d = _parse_date(mo_deadline)
+            if not d or d <= cutoff:
+                kun_belgi = "🔴 BUGUN" if d == today else ("🟡 Ertaga" if d == cutoff else ("⚠️ Muddati o'tgan" if d and d < today else "📅"))
+                mo_tasks.setdefault(montajchi, []).append(
+                    f"✂️ {esc(mavzu)} — {esc(mo_holat)} — {kun_belgi} {esc(mo_deadline)}")
 
     # Operatorlarga yuborish
     for ism, tasks in op_tasks.items():
@@ -1573,18 +1590,18 @@ def setup_jobs(app: Application):
         jq.run_daily(story_notify_group, time=datetime.now(TZ).replace(
             hour=h, minute=0, second=0, microsecond=0).timetz(), name=f"story_{h}")
 
-    # Video zanjiri (operator/montajchi) — 10:00 va 15:00
-    for h in (10, 15):
-        jq.run_daily(video_chain_reminder, time=datetime.now(TZ).replace(
-            hour=h, minute=30, second=0, microsecond=0).timetz(), name=f"video_{h}")
+    # Video zanjiri (operator/montajchi) — kuniga 1 marta, ertalab 08:30
+    # (bugun + ertangi deadline'li ishlarni eslatadi, oldindan tayyorlanish uchun)
+    jq.run_daily(video_chain_reminder, time=datetime.now(TZ).replace(
+        hour=8, minute=30, second=0, microsecond=0).timetz(), name="video")
 
     # Mijozga kunlik savol — 11:00
     jq.run_daily(client_daily_checkin, time=datetime.now(TZ).replace(
         hour=11, minute=0, second=0, microsecond=0).timetz(), name="client_checkin")
 
-    # Treyl video eslatmasi (Husanboyga) — har kuni 17:30
+    # Treyl video eslatmasi (Husanboyga) — har kuni 09:30
     jq.run_daily(treyl_reminder, time=datetime.now(TZ).replace(
-        hour=17, minute=30, second=0, microsecond=0).timetz(), name="treyl")
+        hour=17, minute=00, second=0, microsecond=0).timetz(), name="treyl")
 
     # Post eslatmasi — 17:00
     jq.run_daily(post_ask, time=datetime.now(TZ).replace(
