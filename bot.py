@@ -56,7 +56,7 @@ for _id in os.getenv("ADMIN_IDS", str(ADMIN_CHAT_ID)).split(","):
 
 STORY_HOURS   = [8, 14, 18]   # story eslatma soatlari
 POST_HOUR     = 17            # post eslatma soati
-ASK_DELAY_MIN = 10            # storymaker'dan so'rashdan oldin kutish (daqiqa)
+ASK_DELAY_MIN = 60            # storymaker'dan so'rashdan oldin kutish (daqiqa)
 STORY_TARGET  = 3             # kuniga kerakli story soni
 
 # ═══════════════════════════════════════════════
